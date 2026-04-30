@@ -54,6 +54,11 @@ pub const Quantizer = struct {
                     return error.InputSizeMismatch;
                 try dequantizeSimple(input_bytes, output_f32, pool, .F8_E5M2);
             },
+            .F4_E2M1 => {
+                if (input_bytes.len * 2 != output_f32.len)
+                    return error.InputSizeMismatch;
+                dequantizeFP4(input_bytes, output_f32, pool);
+            },
             .BF16, .bf16 => {
                 if (input_bytes.len / 2 != output_f32.len) return error.InputSizeMismatch;
                 const in_ptr: [*]const ggml.ggml_bf16_t = @ptrCast(@alignCast(input_bytes.ptr));
@@ -100,6 +105,11 @@ pub const Quantizer = struct {
                 if (output_bytes.len != input_f32.len)
                     return error.OutputBufferSizeMismatch;
                 try convertTypeSimple(input_f32, output_bytes, pool, dst_type);
+            },
+            .F4_E2M1 => {
+                if (output_bytes.len * 2 != input_f32.len)
+                    return error.OutputBufferSizeMismatch;
+                quantizeFP4(input_f32, output_bytes, pool);
             },
             .q8_0, .q5_0, .q4_0,
             .q5_1, .q4_1,
@@ -560,6 +570,96 @@ pub const Quantizer = struct {
         if (tbe >= 31 or result > 0x7B) result = 0x7C;
 
         return (from_sign << 7) | result;
+    }
+
+    // -------------------------------------------------------------------------
+    // FP4 E2M1 (NV FP4): 1 sign | 2 exp (bias=1) | 1 mantissa, 2 nibbles/byte.
+    // Positive values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}.
+    // Packing: element[2i] in low nibble, element[2i+1] in high nibble.
+    // -------------------------------------------------------------------------
+
+    pub const lut_fp4_e2m1: [16]f32 = blk: {
+        var t: [16]f32 = undefined;
+        var i: u32 = 0;
+        while (i < 16) : (i += 1) t[i] = fp4_e2m1_to_f32(@intCast(i));
+        break :blk t;
+    };
+
+    pub fn fp4_e2m1_to_f32(nibble: u4) f32 {
+        const positives = [8]f32{ 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0 };
+        const sign: f32 = if ((nibble >> 3) != 0) -1.0 else 1.0;
+        return sign * positives[nibble & 0x7];
+    }
+
+    pub fn f32_to_fp4_e2m1(x: f32) u4 {
+        const bits: u32 = @bitCast(x);
+        const sign: u4 = @truncate(bits >> 31);
+        const abs_bits: u32 = bits & 0x7FFF_FFFF;
+        // NaN/Inf → saturate to max magnitude (6.0)
+        if (abs_bits >= 0x7F80_0000) return (sign << 3) | 0x7;
+        const abs: f32 = @bitCast(abs_bits);
+        // Round-to-nearest-even over the 8 representable magnitudes.
+        // At midpoints, even code (0,2,4,6) wins: use <= for even-lower, < for odd-lower.
+        const code: u4 = if (abs <= 0.25) 0
+            else if (abs < 0.75) 1
+            else if (abs <= 1.25) 2
+            else if (abs < 1.75) 3
+            else if (abs <= 2.5) 4
+            else if (abs < 3.5) 5
+            else if (abs <= 5.0) 6
+            else 7;
+        return (sign << 3) | code;
+    }
+
+    fn dequantizeFP4(input_bytes: []const u8, output_f32: []f32, pool: *std.Thread.Pool) void {
+        const element_count = output_f32.len;
+        if (element_count == 0) return;
+        const threads_count = @min(pool.threads.len, element_count);
+        // Round chunk size up to even so byte boundaries don't straddle threads.
+        const raw_per = element_count / threads_count;
+        const elems_per_thread = @max(2, (raw_per + 1) & ~@as(usize, 1));
+        var wg: std.Thread.WaitGroup = .{};
+        var start: usize = 0;
+        while (start < element_count) : (start += elems_per_thread) {
+            const end = @min(start + elems_per_thread, element_count);
+            pool.spawnWg(&wg, processDequantizeFP4, .{ input_bytes, output_f32, start, end });
+        }
+        wg.wait();
+    }
+
+    fn processDequantizeFP4(input_bytes: []const u8, output_f32: []f32, start: usize, end: usize) void {
+        var i: usize = start;
+        while (i + 1 < end) : (i += 2) {
+            const byte = input_bytes[i / 2];
+            output_f32[i] = lut_fp4_e2m1[byte & 0xF];
+            output_f32[i + 1] = lut_fp4_e2m1[byte >> 4];
+        }
+        if (i < end) output_f32[i] = lut_fp4_e2m1[input_bytes[i / 2] & 0xF];
+    }
+
+    fn quantizeFP4(input_f32: []const f32, output_bytes: []u8, pool: *std.Thread.Pool) void {
+        const element_count = input_f32.len;
+        if (element_count == 0) return;
+        const threads_count = @min(pool.threads.len, element_count);
+        const raw_per = element_count / threads_count;
+        const elems_per_thread = @max(2, (raw_per + 1) & ~@as(usize, 1));
+        var wg: std.Thread.WaitGroup = .{};
+        var start: usize = 0;
+        while (start < element_count) : (start += elems_per_thread) {
+            const end = @min(start + elems_per_thread, element_count);
+            pool.spawnWg(&wg, processQuantizeFP4, .{ input_f32, output_bytes, start, end });
+        }
+        wg.wait();
+    }
+
+    fn processQuantizeFP4(input_f32: []const f32, output_bytes: []u8, start: usize, end: usize) void {
+        var i: usize = start;
+        while (i + 1 < end) : (i += 2) {
+            const lo: u8 = @as(u8, f32_to_fp4_e2m1(input_f32[i]));
+            const hi: u8 = @as(u8, f32_to_fp4_e2m1(input_f32[i + 1]));
+            output_bytes[i / 2] = (hi << 4) | lo;
+        }
+        if (i < end) output_bytes[i / 2] = @as(u8, f32_to_fp4_e2m1(input_f32[i]));
     }
 
     fn bf16_to_f32(x: u16) f32 {

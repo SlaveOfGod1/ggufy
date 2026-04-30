@@ -365,13 +365,14 @@ pub const TensorNode = struct {
             total_elements *= dim;
         }
 
-        return total_elements * self.dtype.?.getSizeInBytes();
+        return self.dtype.?.calcSizeInBytes(@intCast(total_elements));
     }
 };
 
 pub const DType = enum {
     F8_E4M3,
     F8_E5M2,
+    F4_E2M1,
     BF16,
     F16,
     F32,
@@ -387,7 +388,8 @@ pub const DType = enum {
 
     pub fn fromString(str: []const u8) !DType {
         // Convert to uppercase for case-insensitive comparison
-        var buf: [8]u8 = undefined;
+        var buf: [10]u8 = undefined;
+        if (str.len > buf.len) return error.UnknownDType;
         const upper = std.ascii.upperString(&buf, str);
 
         inline for (std.meta.fields(DType)) |field| {
@@ -404,8 +406,17 @@ pub const DType = enum {
             .BF16, .F16 => 2,
             .F32, .I32, .U32 => 4,
             .F64, .I64, .U64 => 8,
-            .I8, .U8, .F8_E4M3, .F8_E5M2, => 1,
+            .I8, .U8, .F8_E4M3, .F8_E5M2 => 1,
             .I16, .U16 => 2,
+            .F4_E2M1 => 1, // sub-byte: use calcSizeInBytes(n) for accurate byte counts
+        };
+    }
+
+    /// Returns byte size for n elements, correctly handling sub-byte types like F4_E2M1.
+    pub fn calcSizeInBytes(self: DType, n: u64) u64 {
+        return switch (self) {
+            .F4_E2M1 => (n + 1) / 2,
+            else => self.getSizeInBytes() * n,
         };
     }
 };
@@ -557,7 +568,7 @@ pub fn printHeader(self: Safetensors, writer: *std.io.Writer) !void {
         // Calculate expected size from dtype + shape
         var n_elements: u64 = 1;
         for (t.dims) |d| n_elements *= d;
-        const expected_size: u64 = dt.getSizeInBytes() * n_elements;
+        const expected_size: u64 = dt.calcSizeInBytes(n_elements);
 
         // The stored size (end - start) must match expected
         if (t.size != expected_size) {
@@ -715,7 +726,7 @@ pub fn writeTensorData(
     const source_size: usize = switch (source_dtype.formatType()) {
         .safetensors => blk: {
             const stype = try Safetensors.DType.fromString(@tagName(source_dtype));
-            break :blk stype.getSizeInBytes() * n_elements;
+            break :blk stype.calcSizeInBytes(n_elements);
         },
         .gguf => blk: {
             const stype = try gguf.GgmlType.fromString(@tagName(source_dtype));
