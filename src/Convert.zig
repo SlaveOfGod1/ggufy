@@ -12,6 +12,7 @@ const ScaledQuant = @import("ScaledQuant.zig");
 const DataTransform = @import("DataTransform.zig");
 
 pub const mxfp4_comfy_json = "{\"format\":\"mxfp4\"}";
+pub const mxfp8_comfy_json = "{\"format\":\"mxfp8\"}";
 pub const fp8_comfy_json   = "{\"format\": \"float8_e4m3fn\"}";
 
 // ============================================================================
@@ -628,6 +629,25 @@ fn assignTensorType(
                 const scale_bytes:  u64 = n_rows * ((n_cols + 31) / 32);
                 const comfy_bytes:  u64 = mxfp4_comfy_json.len;
                 t.type = "MXFP4";
+                t.size = weight_bytes + scale_bytes + comfy_bytes;
+                return;
+            }
+        }
+        return nearestCompatibleType(t, opts, num_elements);
+    }
+
+    // MXFP8 safetensors output: ComfyUI cluster (F8_E4M3 weight + U8 scales + comfy_quant).
+    // Only weight matrices get cluster treatment; biases/norms fall back to their source type.
+    if (ttype == .MXFP8_E4M3 and opts.filetype == .safetensors and t.dims.len >= 1) {
+        if (std.mem.endsWith(u8, t.name, ".weight")) {
+            const n_cols: u64 = t.dims[t.dims.len - 1];
+            // Require at least one full 32-element block; conv kernels with tiny last dims fall back.
+            if (n_cols >= 32) {
+                const n_rows: u64 = num_elements / n_cols;
+                const weight_bytes: u64 = n_rows * n_cols;  // 1 byte per F8_E4M3 element
+                const scale_bytes:  u64 = n_rows * ((n_cols + 31) / 32);
+                const comfy_bytes:  u64 = mxfp8_comfy_json.len;
+                t.type = "MXFP8_E4M3";
                 t.size = weight_bytes + scale_bytes + comfy_bytes;
                 return;
             }

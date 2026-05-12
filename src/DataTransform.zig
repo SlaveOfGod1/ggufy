@@ -590,6 +590,27 @@ pub const Quantizer = struct {
         return @bitCast(@as(u32, x) << 23);
     }
 
+    /// Encode an f32 value to E8M0 (8-bit exponent-only) format.
+    /// Extracts the f32 biased exponent (range 0-255) and returns it directly.
+    /// Special cases: NaN/Inf → 255, zero/subnormal → 0.
+    pub fn f32_to_e8m0(x: f32) u8 {
+        const bits: u32 = @bitCast(x);
+        const abs_bits: u32 = bits & 0x7FFF_FFFF;
+
+        // Zero → 0
+        if (abs_bits == 0) return 0;
+        // Extract biased exponent (bits 23-30)
+        const biased_exp: u32 = (abs_bits >> 23) & 0xFF;
+
+        // NaN or Inf (exp == 255) → 255
+        // Subnormal (exp == 0) → 0
+        // Normal → biased_exp
+        if (biased_exp == 0) return 0;
+        if (biased_exp == 255) return 255;
+
+        return @truncate(biased_exp);
+    }
+
     // -------------------------------------------------------------------------
     // FP4 / E2M1: 1 sign | 2 exp (bias=1) | 1 mantissa, 2 nibbles/byte.
     // Positive values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}.
@@ -717,13 +738,13 @@ pub const Quantizer = struct {
     }
 
     // -------------------------------------------------------------------------
-    // ComfyUI MXFP4 cluster quantization.
-    // Produces weight (U8 sequential OCP nibbles) and scale (U8 E8M0 per block).
+    // ComfyUI MXFP cluster quantization.
+    // Produces weight and scale.
     // -------------------------------------------------------------------------
 
-    pub const ComfyMxfp4Data = struct { weight: []u8, scale: []u8 };
+    pub const ComfyMxfpData = struct { weight: []u8, scale: []u8 };
 
-    /// Quantize F32 input to MXFP4 cluster format (as in model-mxfp4.safetensors):
+    /// Quantize F32 input to MXFP4 cluster format
     ///   weight: sequential OCP nibbles (8 per U32, stored as raw bytes)
     ///   scale:  E8M0 byte per 32-element block
     /// Caller owns both returned slices.
@@ -731,7 +752,7 @@ pub const Quantizer = struct {
         allocator: std.mem.Allocator,
         input: []const f32,
         pool: *std.Thread.Pool,
-    ) !ComfyMxfp4Data {
+    ) !ComfyMxfpData {
         const n = input.len;
         if (n % 32 != 0) return error.ElementCountNotMultipleOf32;
         const n_blocks = n / 32;
@@ -764,6 +785,82 @@ pub const Quantizer = struct {
         }
 
         return .{ .weight = weight, .scale = scale };
+    }
+
+    /// Quantize F32 data to ComfyUI MXFP8 cluster format.
+        /// Returns weight (F8_E4M3, 1 byte per element) and scale (E8M0, 1 byte per block of 32).
+        pub fn quantizeToComfyMxfp8(
+        allocator: std.mem.Allocator,
+        f32_slice: []const f32,
+        pool: *std.Thread.Pool,
+    ) !ComfyMxfpData {
+        const n_elements = f32_slice.len;
+        if (n_elements % 32 != 0) return error.InvalidMxfp8Size;
+
+        const n_blocks = n_elements / 32;
+        const weight = try allocator.alloc(u8, n_elements);
+        errdefer allocator.free(weight);
+        const scale = try allocator.alloc(u8, n_blocks);
+        errdefer allocator.free(scale);
+
+        const threads_u64: u64 = @intCast(pool.threads.len);
+        const blocks_per_thread = @divTrunc(n_blocks, threads_u64);
+        const leftover = n_blocks - (blocks_per_thread * threads_u64);
+
+        var wg: std.Thread.WaitGroup = .{};
+        var i: u64 = 0;
+        while (i < threads_u64) : (i += 1) {
+            const start = i * blocks_per_thread;
+            var end = start + blocks_per_thread;
+            if (i == threads_u64 - 1) end += leftover;
+            pool.spawnWg(&wg, processMxfp8Blocks, .{ f32_slice, weight, scale, start, end });
+        }
+        wg.wait();
+
+        return .{ .weight = weight, .scale = scale };
+    }
+
+    fn processMxfp8Blocks(input: []const f32, weight: []u8, scale: []u8, start: u64, end: u64) void {
+        const start_usize: usize = @intCast(start);
+        const end_usize: usize = @intCast(end);
+        for (start_usize..end_usize) |block_idx| {
+            const elem_start = block_idx * 32;
+            const block = input[elem_start..][0..32];
+
+            // Find max absolute value in this block
+            var amax: f32 = 0.0;
+            for (block) |val| {
+                amax = @max(amax, @abs(val));
+            }
+
+            // Handle zero/near-zero blocks
+            if (amax < 1e-30) {
+                scale[block_idx] = 0;
+                for (0..32) |i| weight[elem_start + i] = 0;
+                continue;
+            }
+
+            // OCP MX spec: shared_exp = floor(log2(amax)) + 1
+            // This gives us the scale as 2^shared_exp
+            // E8M0 stores this directly as (shared_exp + 127)
+            const log2_amax = @log2(amax);
+            const shared_exp_unbiased: i32 = @as(i32, @intFromFloat(@floor(log2_amax))) + 1;
+            const shared_exp_biased: i32 = shared_exp_unbiased + 127;
+
+            // Clamp to valid E8M0 range [0, 255]
+            const scale_byte: u8 = @intCast(std.math.clamp(shared_exp_biased, 0, 254));
+            scale[block_idx] = scale_byte;
+
+            // Decode the scale for quantization
+            const scale_f32 = e8m0_to_f32(scale_byte);
+            const inv_scale = 1.0 / scale_f32;
+
+            // Quantize elements: divide by scale then encode as F8_E4M3
+            for (block, 0..) |val, i| {
+                const scaled = val * inv_scale;
+                weight[elem_start + i] = f32_to_fp8_e4m3(scaled);
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
