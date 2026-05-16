@@ -22,6 +22,7 @@ pub const nvfp4_comfy_json  = "{\"format\":\"nvfp4\"}";
 
 /// All options that drive a conversion, collected from CLI args.
 pub const ConvertOptions = struct {
+    io: std.Io,
     path: []const u8,
     filetype: types.FileType,
     datatype: ?types.DataType,
@@ -162,13 +163,13 @@ pub fn convert(
     // --- Assign quantization types (template or auto) -------------------------
     var template_metadata: ?std.json.ObjectMap = null;
     if (opts.template_path) |tp| {
-        template_metadata = try applyTemplate(tp, &model_tensors, opts.filetype, arena_alloc);
+        template_metadata = try applyTemplate(opts.io, tp, &model_tensors, opts.filetype, arena_alloc);
     } else {
         try assignQuantTypes(&model_tensors, arch, threshold, opts, arena_alloc);
     }
 
     // --- Shape fix ------------------------------------------------------------
-    var extra_metadata = std.StringArrayHashMap(std.json.Value).init(arena_alloc);
+    var extra_metadata: std.json.ObjectMap = .empty;
     if (arch.shape_fix and opts.filetype == .gguf) {
         try applyShapeFix(&model_tensors, &extra_metadata, arena_alloc);
     }
@@ -325,7 +326,7 @@ fn filterAndStripTensors(
         // (VAE, text encoders, etc.) round-trip intact.
         for (f.tensors.items) |t| {
             if (!arch.shouldIgnore(t.name)) {
-                try model_tensors.append(arena_alloc, try t.dupe(arena_alloc));
+                try model_tensors.append(arena_alloc,try t.dupe(arena_alloc));
             }
         }
         return model_tensors;
@@ -347,14 +348,14 @@ fn filterAndStripTensors(
         if (has_model_prefix) {
             if (std.mem.startsWith(u8, t.name, "model.")) {
                 if (!arch.shouldIgnore(t.name)) {
-                    try model_tensors.append(arena_alloc, try t.dupe(arena_alloc));
+                    try model_tensors.append(arena_alloc,try t.dupe(arena_alloc));
                 }
             } else {
                 std.log.info("Filtering out tensor: {s}", .{t.name});
             }
         } else {
             if (!arch.shouldIgnore(t.name)) {
-                try model_tensors.append(arena_alloc, try t.dupe(arena_alloc));
+                try model_tensors.append(arena_alloc,try t.dupe(arena_alloc));
             }
         }
     }
@@ -375,6 +376,7 @@ fn filterAndStripTensors(
 /// applying the shapes and types specified there. Returns any template-level
 /// metadata found under the "metadata" key.
 fn applyTemplate(
+    io: std.Io,
     template_path: []const u8,
     model_tensors: *std.ArrayList(types.Tensor),
     output_filetype: types.FileType,
@@ -382,9 +384,11 @@ fn applyTemplate(
 ) !?std.json.ObjectMap {
     std.log.info("Using template {s}", .{template_path});
 
-    const t_file = try std.fs.cwd().openFile(template_path, .{});
-    defer t_file.close();
-    const t_content = try t_file.readToEndAlloc(arena_alloc, 10 * 1024 * 1024);
+    const t_file = try std.Io.Dir.cwd().openFile(io, template_path, .{ .mode = .read_only });
+    defer t_file.close(io);
+    var t_reader_buf: [8192]u8 = undefined;
+    var t_reader = t_file.reader(io, &t_reader_buf);
+    const t_content = try t_reader.interface.allocRemaining(arena_alloc, .unlimited);
     const t_json = try std.json.parseFromSlice(std.json.Value, arena_alloc, t_content, .{});
 
     var template_metadata: ?std.json.ObjectMap = null;
@@ -404,7 +408,7 @@ fn applyTemplate(
 
         if (source_tensor) |src| {
             const new_t = try applyTemplateEntry(src, target_name, target_info, output_filetype, arena_alloc);
-            try filtered.append(arena_alloc, new_t);
+            try filtered.append(arena_alloc,new_t);
             std.log.info("Matched target tensor {s} to source tensor {s}, setting to type {s}", .{ target_name, src.name, new_t.type });
         } else {
             std.log.warn("Warning: Template tensor {s} not found in source file.", .{target_name});
@@ -498,9 +502,11 @@ fn assignQuantTypes(
         if (opts.sensitivities_path) |sp| {
             // User-supplied file overrides the built-in one.
             std.log.info("Using user-supplied sensitivities file: {s}", .{sp});
-            const sens_file = try std.fs.cwd().openFile(sp, .{});
-            defer sens_file.close();
-            const sens_content = try sens_file.readToEndAlloc(arena_alloc, 32 * 1024 * 1024);
+            const sens_file = try std.Io.Dir.cwd().openFile(opts.io, sp, .{ .mode = .read_only });
+            defer sens_file.close(opts.io);
+            var sens_reader_buf: [8192]u8 = undefined;
+            var sens_reader = sens_file.reader(opts.io, &sens_reader_buf);
+            const sens_content = try sens_reader.interface.allocRemaining(arena_alloc, .unlimited);
             sensitivities = try std.json.parseFromSlice(std.json.Value, arena_alloc, sens_content, .{});
             use_sensitivity = true;
         } else if (arch.sensitivities.len > 1) {
@@ -538,7 +544,7 @@ fn assignQuantTypes(
         var dims_buf = try std.ArrayList(u8).initCapacity(arena_alloc, 5);
         for (t.dims, 0..) |d, i| {
             if (i > 0) try dims_buf.appendSlice(arena_alloc, ", ");
-            try std.fmt.format(dims_buf.writer(arena_alloc), "{}", .{d});
+            try dims_buf.print(arena_alloc, "{}", .{d});
         }
         std.log.debug("{s}: Calculated size {} for type {s} with num elements {} with dims [{s}]", .{ t.name, t.size, t.type, num_elements, dims_buf.items });
 
@@ -748,7 +754,7 @@ const REARRANGE_THRESHOLD = 512;
 /// `extra_metadata`.
 fn applyShapeFix(
     model_tensors: *std.ArrayList(types.Tensor),
-    extra_metadata: *std.StringArrayHashMap(std.json.Value),
+    extra_metadata: *std.json.ObjectMap,
     arena_alloc: std.mem.Allocator,
 ) !void {
     for (model_tensors.items) |*t| {
@@ -772,7 +778,7 @@ fn applyShapeFix(
         var orig_shape_arr = std.json.Array.init(arena_alloc);
         for (t.dims) |d| try orig_shape_arr.append(.{ .integer = @intCast(d) });
         const key = try std.fmt.allocPrint(arena_alloc, "comfy.gguf.orig_shape.{s}", .{t.name});
-        try extra_metadata.put(key, .{ .array = orig_shape_arr });
+        try extra_metadata.put(arena_alloc, key, .{ .array = orig_shape_arr });
 
         // Reshape to (N/256, 256).
         var new_dims = try arena_alloc.alloc(usize, 2);
@@ -789,7 +795,7 @@ fn writeGguf(
     model_tensors: std.ArrayList(types.Tensor),
     arch: *const imagearch.Arch,
     template_metadata: ?std.json.ObjectMap,
-    extra_metadata: std.StringArrayHashMap(std.json.Value),
+    extra_metadata: std.json.ObjectMap,
     opts: ConvertOptions,
     allocator: std.mem.Allocator,
     arena_alloc: std.mem.Allocator,
@@ -798,8 +804,7 @@ fn writeGguf(
     // --- Resolve output path -------------------------------------------------
     const dir_path = if (opts.output_dir) |od| od else std.fs.path.dirname(opts.path) orelse ".";
 
-    var cwd = std.fs.cwd();
-    const dir_result = try cwd.makePathStatus(dir_path);
+    const dir_result = try std.Io.Dir.cwd().createDirPathStatus(opts.io, dir_path, .default_dir);
     if (dir_result == .created) std.log.info("Created directory {s}", .{dir_path});
 
     const base_name = if (opts.output_name) |on| on else blk: {
@@ -814,29 +819,29 @@ fn writeGguf(
     );
 
     // --- Initialise GGUF writer ----------------------------------------------
-    var out_gguf = try gguf.init(out_filename, allocator, arena_alloc, true);
+    var out_gguf = try gguf.init(out_filename, opts.io, allocator, arena_alloc, true);
     defer out_gguf.deinit();
     out_gguf.tensors = model_tensors;
 
     // Standard metadata.
     const arch_name = opts.arch_override orelse arch.name;
-    try out_gguf.metadata.put(try arena_alloc.dupe(u8, "general.architecture"), .{ .string = arch_name });
-    try out_gguf.metadata.put(try arena_alloc.dupe(u8, "general.quantization_version"), .{ .integer = 2 });
+    try out_gguf.metadata.put(arena_alloc,try arena_alloc.dupe(u8, "general.architecture"), .{ .string = arch_name });
+    try out_gguf.metadata.put(arena_alloc,try arena_alloc.dupe(u8, "general.quantization_version"), .{ .integer = 2 });
     // TODO: determine from the target dtype.
-    try out_gguf.metadata.put(try arena_alloc.dupe(u8, "general.file_type"), .{ .integer = 7 });
+    try out_gguf.metadata.put(arena_alloc,try arena_alloc.dupe(u8, "general.file_type"), .{ .integer = 7 });
 
     // Template metadata takes priority over source-file metadata.
     if (template_metadata) |meta| {
         var it = meta.iterator();
         while (it.next()) |entry| {
             if (!out_gguf.metadata.contains(entry.key_ptr.*))
-                try out_gguf.metadata.put(try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+                try out_gguf.metadata.put(arena_alloc,try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
         }
     } else if (f.metadata) |meta| {
         var it = meta.iterator();
         while (it.next()) |entry| {
             if (!out_gguf.metadata.contains(entry.key_ptr.*))
-                try out_gguf.metadata.put(try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+                try out_gguf.metadata.put(arena_alloc,try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
         }
     }
 
@@ -844,12 +849,12 @@ fn writeGguf(
     var extra_it = extra_metadata.iterator();
     while (extra_it.next()) |entry| {
         if (!out_gguf.metadata.contains(entry.key_ptr.*))
-            try out_gguf.metadata.put(try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+            try out_gguf.metadata.put(arena_alloc,try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
     }
 
     out_gguf.saveWithSTData(f, opts.threads, opts.callbacks, groups) catch |err| {
         if (err == error.Cancelled) {
-            std.fs.deleteFileAbsolute(out_filename) catch {};
+            std.Io.Dir.deleteFileAbsolute(opts.io, out_filename) catch {};
         }
         return err;
     };
@@ -861,7 +866,7 @@ fn writeSafetensors(
     model_tensors: std.ArrayList(types.Tensor),
     arch: *const imagearch.Arch,
     template_metadata: ?std.json.ObjectMap,
-    extra_metadata: std.StringArrayHashMap(std.json.Value),
+    extra_metadata: std.json.ObjectMap,
     opts: ConvertOptions,
     allocator: std.mem.Allocator,
     arena_alloc: std.mem.Allocator,
@@ -870,9 +875,8 @@ fn writeSafetensors(
     // --- Resolve output path -------------------------------------------------
     const dir_path = if (opts.output_dir) |od| od else std.fs.path.dirname(opts.path) orelse ".";
 
-    var cwd = std.fs.cwd();
-    const dir_result = try cwd.makePathStatus(dir_path);
-    if (dir_result == .created) std.log.info("Created directory {s}", .{dir_path});
+    const dir_result2 = try std.Io.Dir.cwd().createDirPathStatus(opts.io, dir_path, .default_dir);
+    if (dir_result2 == .created) std.log.info("Created directory {s}", .{dir_path});
 
     const base_name = if (opts.output_name) |on| on else blk: {
         const stem = std.fs.path.stem(opts.path);
@@ -886,25 +890,25 @@ fn writeSafetensors(
     );
 
     // --- Initialise Safetensors writer ----------------------------------------------
-    var out_st = try st.init(out_filename, allocator, arena_alloc, true, true);
+    var out_st = try st.init(out_filename, opts.io, allocator, arena_alloc, true, true);
     defer out_st.deinit();
     out_st.tensors = model_tensors;
 
     // Copy any metadata from the source, if there is any
-    out_st.metadata = if (f.metadata) |meta| try meta.clone() else null;
+    out_st.metadata = if (f.metadata) |meta| try meta.clone(arena_alloc) else null;
 
     // Template metadata takes priority over source-file metadata.
     if (template_metadata) |meta| {
         var it = meta.iterator();
         while (it.next()) |entry| {
             if (!out_st.metadata.?.contains(entry.key_ptr.*))
-                try out_st.metadata.?.put(try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+                try out_st.metadata.?.put(arena_alloc, try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
         }
     } else if (f.metadata) |meta| {
         var it = meta.iterator();
         while (it.next()) |entry| {
             if (!out_st.metadata.?.contains(entry.key_ptr.*))
-                try out_st.metadata.?.put(try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+                try out_st.metadata.?.put(arena_alloc, try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
         }
     }
 
@@ -912,12 +916,12 @@ fn writeSafetensors(
     var extra_it = extra_metadata.iterator();
     while (extra_it.next()) |entry| {
         if (!out_st.metadata.?.contains(entry.key_ptr.*))
-            try out_st.metadata.?.put(try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+            try out_st.metadata.?.put(arena_alloc, try arena_alloc.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
     }
 
     out_st.saveWithSTData(f, opts.threads, opts.callbacks, groups) catch |err| {
         if (err == error.Cancelled) {
-            std.fs.deleteFileAbsolute(out_filename) catch {};
+            std.Io.Dir.deleteFileAbsolute(opts.io, out_filename) catch {};
         }
         return err;
     };
@@ -950,7 +954,7 @@ fn filterTensorsForExport(
         }
         var duped = try t.dupe(arena_alloc);
         duped.name = try arena_alloc.dupe(u8, imagearch.stripPrefix(duped.name));
-        try result.append(arena_alloc, duped);
+        try result.append(arena_alloc,duped);
     }
     return result;
 }
@@ -963,17 +967,17 @@ pub fn writeTemplateFromTensors(
     tensors: []const types.Tensor,
     arch_opt: ?*const imagearch.Arch,
     reverse_dims: bool,
-    writer: *std.io.Writer,
+    writer: *std.Io.Writer,
     arena_alloc: std.mem.Allocator,
 ) !void {
     const filtered = try filterTensorsForExport(tensors, arch_opt, arena_alloc);
 
-    var tensors_obj = std.json.ObjectMap.init(arena_alloc);
-    defer tensors_obj.deinit();
+    var tensors_obj: std.json.ObjectMap = .empty;
+    defer tensors_obj.deinit(arena_alloc);
 
     for (filtered.items) |t| {
-        var t_obj = std.json.ObjectMap.init(arena_alloc);
-        errdefer t_obj.deinit();
+        var t_obj: std.json.ObjectMap = .empty;
+        errdefer t_obj.deinit(arena_alloc);
 
         var shape_arr = std.json.Array.init(arena_alloc);
         errdefer shape_arr.deinit();
@@ -986,14 +990,14 @@ pub fn writeTemplateFromTensors(
         } else {
             for (t.dims) |d| try shape_arr.append(.{ .integer = @intCast(d) });
         }
-        try t_obj.put("shape", .{ .array = shape_arr });
-        try t_obj.put("type", .{ .string = t.type });
-        try tensors_obj.put(try arena_alloc.dupe(u8, t.name), .{ .object = t_obj });
+        try t_obj.put(arena_alloc, "shape", .{ .array = shape_arr });
+        try t_obj.put(arena_alloc, "type", .{ .string = t.type });
+        try tensors_obj.put(arena_alloc, try arena_alloc.dupe(u8, t.name), .{ .object = t_obj });
     }
 
-    var root_obj = std.json.ObjectMap.init(arena_alloc);
-    defer root_obj.deinit();
-    try root_obj.put("tensors", .{ .object = tensors_obj });
+    var root_obj: std.json.ObjectMap = .empty;
+    defer root_obj.deinit(arena_alloc);
+    try root_obj.put(arena_alloc, "tensors", .{ .object = tensors_obj });
 
     var stringifier = std.json.Stringify{ .writer = writer, .options = .{ .whitespace = .indent_2 } };
     try stringifier.write(std.json.Value{ .object = root_obj });
@@ -1023,13 +1027,16 @@ fn safetensorDisplayType(type_str: []const u8) []const u8 {
 /// For SafeTensors: the lowest-precision type; appends "-MIXED" when multiple
 /// distinct types are present. Both FP8 variants display as "FP8".
 pub fn templateTypeSuffix(
+    io: std.Io,
     template_path: []const u8,
     filetype: types.FileType,
     arena_alloc: std.mem.Allocator,
 ) ![]const u8 {
-    const t_file = try std.fs.cwd().openFile(template_path, .{});
-    defer t_file.close();
-    const content = try t_file.readToEndAlloc(arena_alloc, 10 * 1024 * 1024);
+    const t_file = try std.Io.Dir.cwd().openFile(io, template_path, .{ .mode = .read_only });
+    defer t_file.close(io);
+    var t_reader_buf: [8192]u8 = undefined;
+    var t_reader = t_file.reader(io, &t_reader_buf);
+    const content = try t_reader.interface.allocRemaining(arena_alloc, .unlimited);
     const parsed = try std.json.parseFromSlice(std.json.Value, arena_alloc, content, .{});
 
     const tensors_val = parsed.value.object.get("tensors") orelse return error.InvalidTemplate;
@@ -1086,13 +1093,13 @@ pub fn generateSensitivitiesFromTensors(
     tensors: []const types.Tensor,
     arch_opt: ?*const imagearch.Arch,
     threshold: u64,
-    writer: *std.io.Writer,
+    writer: *std.Io.Writer,
     arena_alloc: std.mem.Allocator,
 ) !void {
     const filtered = try filterTensorsForExport(tensors, arch_opt, arena_alloc);
 
-    var sens_obj = std.json.ObjectMap.init(arena_alloc);
-    defer sens_obj.deinit();
+    var sens_obj: std.json.ObjectMap = .empty;
+    defer sens_obj.deinit(arena_alloc);
 
     for (filtered.items) |t| {
         var n_elements: u64 = 1;
@@ -1102,7 +1109,7 @@ pub fn generateSensitivitiesFromTensors(
             if (a.isHighPrecision(t.name)) continue;
             if (a.shouldUpcast(t.name)) continue;
         }
-        try sens_obj.put(try arena_alloc.dupe(u8, t.name), .{ .float = 50.0 });
+        try sens_obj.put(arena_alloc, try arena_alloc.dupe(u8, t.name), .{ .float = 50.0 });
     }
 
     var stringifier = std.json.Stringify{ .writer = writer, .options = .{ .whitespace = .indent_2 } };

@@ -2,6 +2,7 @@ const std = @import("std");
 const gguf = @import("Gguf.zig");
 const types = @import("types.zig");
 const ggml = @import("ggml.h");
+const thread_pool_mod = @import("ThreadPool.zig");
 
 pub const Quantizer = struct {
     // Main entry point: Source -> F32 -> Dest
@@ -11,7 +12,7 @@ pub const Quantizer = struct {
         src_type: types.DataType,
         dst_type: types.DataType,
         element_count: u64,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
     ) ![]u8 {
         // Optimization: Direct copy if types match
         if (src_type.equivalentType(@tagName(dst_type))) {
@@ -41,7 +42,7 @@ pub const Quantizer = struct {
         input_bytes: []const u8,
         output_f32: []f32,
         src_type: types.DataType,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
     ) !void {
         switch (src_type) {
             .F8_E4M3 => {
@@ -92,7 +93,7 @@ pub const Quantizer = struct {
         input_f32: []const f32,
         output_bytes: []u8,
         dst_type: types.DataType,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
     ) !void {
         switch (dst_type) {
             .f32, .F32 => {
@@ -141,7 +142,7 @@ pub const Quantizer = struct {
     fn convertTypeGguf(
         input_f32: []const f32,
         output_bytes: []u8,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
         q_type: gguf.GgmlType,
         block_elements: u64,
         block_size: u64,
@@ -157,7 +158,7 @@ pub const Quantizer = struct {
         const blocks_per_thread = @divTrunc(block_count, threads_u64);
         const leftover = block_count - (blocks_per_thread * threads_u64);
 
-        var wg: std.Thread.WaitGroup = .{};
+        var wg: thread_pool_mod.WaitGroup = .{};
 
         var i: u64 = 0;
         while (i < threads_u64) : (i += 1) {
@@ -195,7 +196,7 @@ pub const Quantizer = struct {
     fn convertTypeSimple(
         input_f32: []const f32,
         output_bytes: []u8,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
         dst_type: types.DataType,
     ) !void {
         const element_count = input_f32.len;
@@ -203,7 +204,7 @@ pub const Quantizer = struct {
         const elems_per_thread = element_count / threads_count;
         const leftover = element_count - (elems_per_thread * threads_count);
 
-        var wg: std.Thread.WaitGroup = .{};
+        var wg: thread_pool_mod.WaitGroup = .{};
 
         var i: usize = 0;
         while (i < threads_count) : (i += 1) {
@@ -366,7 +367,7 @@ pub const Quantizer = struct {
     fn dequantizeSimple(
         input_bytes: []const u8,
         output_f32: []f32,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
         src_type: types.DataType,
     ) !void {
         const element_count = output_f32.len;
@@ -374,7 +375,7 @@ pub const Quantizer = struct {
         const elems_per_thread = element_count / threads_count;
         const leftover = element_count - (elems_per_thread * threads_count);
 
-        var wg: std.Thread.WaitGroup = .{};
+        var wg: thread_pool_mod.WaitGroup = .{};
 
         var i: usize = 0;
         while (i < threads_count) : (i += 1) {
@@ -652,14 +653,14 @@ pub const Quantizer = struct {
         return (sign << 3) | code;
     }
 
-    fn dequantizeFP4(input_bytes: []const u8, output_f32: []f32, pool: *std.Thread.Pool) void {
+    fn dequantizeFP4(input_bytes: []const u8, output_f32: []f32, pool: *thread_pool_mod.ThreadPool) void {
         const element_count = output_f32.len;
         if (element_count == 0) return;
         const threads_count = @min(pool.threads.len, element_count);
         // Round chunk size up to even so byte boundaries don't straddle threads.
         const raw_per = element_count / threads_count;
         const elems_per_thread = @max(2, (raw_per + 1) & ~@as(usize, 1));
-        var wg: std.Thread.WaitGroup = .{};
+        var wg: thread_pool_mod.WaitGroup = .{};
         var start: usize = 0;
         while (start < element_count) : (start += elems_per_thread) {
             const end = @min(start + elems_per_thread, element_count);
@@ -678,13 +679,13 @@ pub const Quantizer = struct {
         if (i < end) output_f32[i] = lut_fp4_e2m1[input_bytes[i / 2] & 0xF];
     }
 
-    fn quantizeFP4(input_f32: []const f32, output_bytes: []u8, pool: *std.Thread.Pool) void {
+    fn quantizeFP4(input_f32: []const f32, output_bytes: []u8, pool: *thread_pool_mod.ThreadPool) void {
         const element_count = input_f32.len;
         if (element_count == 0) return;
         const threads_count = @min(pool.threads.len, element_count);
         const raw_per = element_count / threads_count;
         const elems_per_thread = @max(2, (raw_per + 1) & ~@as(usize, 1));
-        var wg: std.Thread.WaitGroup = .{};
+        var wg: thread_pool_mod.WaitGroup = .{};
         var start: usize = 0;
         while (start < element_count) : (start += elems_per_thread) {
             const end = @min(start + elems_per_thread, element_count);
@@ -716,7 +717,7 @@ pub const Quantizer = struct {
     pub fn quantizeToComfyFp8(
         allocator: std.mem.Allocator,
         input: []const f32,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
     ) !ComfyFp8Data {
         var amax: f32 = 0.0;
         for (input) |v| amax = @max(amax, @abs(v));
@@ -751,7 +752,7 @@ pub const Quantizer = struct {
     pub fn quantizeToComfyMxfp4(
         allocator: std.mem.Allocator,
         input: []const f32,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
     ) !ComfyMxfpData {
         const n = input.len;
         if (n % 32 != 0) return error.ElementCountNotMultipleOf32;
@@ -792,7 +793,7 @@ pub const Quantizer = struct {
         pub fn quantizeToComfyMxfp8(
         allocator: std.mem.Allocator,
         f32_slice: []const f32,
-        pool: *std.Thread.Pool,
+        pool: *thread_pool_mod.ThreadPool,
     ) !ComfyMxfpData {
         const n_elements = f32_slice.len;
         if (n_elements % 32 != 0) return error.InvalidMxfp8Size;
@@ -807,7 +808,7 @@ pub const Quantizer = struct {
         const blocks_per_thread = @divTrunc(n_blocks, threads_u64);
         const leftover = n_blocks - (blocks_per_thread * threads_u64);
 
-        var wg: std.Thread.WaitGroup = .{};
+        var wg: thread_pool_mod.WaitGroup = .{};
         var i: u64 = 0;
         while (i < threads_u64) : (i += 1) {
             const start = i * blocks_per_thread;
@@ -871,14 +872,14 @@ pub const Quantizer = struct {
     // qs[j] high nibble → element j + 16
     // -------------------------------------------------------------------------
 
-    fn dequantizeMXFP4Gguf(input_bytes: []const u8, output_f32: []f32, pool: *std.Thread.Pool) void {
+    fn dequantizeMXFP4Gguf(input_bytes: []const u8, output_f32: []f32, pool: *thread_pool_mod.ThreadPool) void {
         const block_count = output_f32.len / 32;
         if (block_count == 0) return;
         const threads_count = @min(pool.threads.len, block_count);
         const blocks_per_thread = block_count / threads_count;
         const leftover = block_count - (blocks_per_thread * threads_count);
 
-        var wg: std.Thread.WaitGroup = .{};
+        var wg: thread_pool_mod.WaitGroup = .{};
         var i: usize = 0;
         while (i < threads_count) : (i += 1) {
             const start_block = i * blocks_per_thread;
@@ -911,23 +912,36 @@ pub const Quantizer = struct {
     }
 };
 
+fn readFileToOwnedSlice(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
+    const io = std.testing.io;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const file_len = try file.length(io);
+    if (file_len > max_size) return error.FileTooLarge;
+    const buf = try allocator.alloc(u8, @intCast(file_len));
+    errdefer allocator.free(buf);
+    _ = try file.readPositionalAll(io, buf, 0);
+    return buf;
+}
+
 test "transform f16 to q8_0" {
     const allocator = std.testing.allocator;
 
     // Load the f16 source file (skip test if artifacts not present)
-    const f16_file = std.fs.cwd().openFile("test-artifact/output_blocks.1.1.transformer_blocks.1.attn1.to_q.weight.f16", .{}) catch |err| {
+    const f16_data = readFileToOwnedSlice(
+        allocator,
+        "test-artifact/output_blocks.1.1.transformer_blocks.1.attn1.to_q.weight.f16",
+        10 * 1024 * 1024,
+    ) catch |err| {
         if (err == error.FileNotFound) return error.SkipZigTest;
         return err;
     };
-    defer f16_file.close();
-
-    const f16_data = try f16_file.readToEndAlloc(allocator, 10 * 1024 * 1024);
     defer allocator.free(f16_data);
 
     // Calculate element count (f16 is 2 bytes per element)
     const element_count: u64 = @intCast(f16_data.len / 2);
 
-    var pool: std.Thread.Pool = undefined;
+    var pool: thread_pool_mod.ThreadPool = undefined;
     try pool.init(.{ .allocator = allocator, .n_jobs = 1 });
     defer pool.deinit();
 
@@ -945,10 +959,11 @@ test "transform f16 to q8_0" {
     try std.testing.expectEqual(q8_0_data.len, 1740800);
 
     // Load the expected q8_0 file
-    const expected_file = try std.fs.cwd().openFile("test-artifact/output_blocks.1.1.transformer_blocks.1.attn1.to_q.weight.q8_0", .{});
-    defer expected_file.close();
-
-    const expected_data = try expected_file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    const expected_data = try readFileToOwnedSlice(
+        allocator,
+        "test-artifact/output_blocks.1.1.transformer_blocks.1.attn1.to_q.weight.q8_0",
+        10 * 1024 * 1024,
+    );
     defer allocator.free(expected_data);
 
     // Compare the results
@@ -968,12 +983,10 @@ const fixture_dir = "src/test_fixtures";
 fn loadFixture(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
     var path_buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ fixture_dir, name });
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    return readFileToOwnedSlice(allocator, path, 64 * 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) return null;
         return err;
     };
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
 }
 
 // Returns the number of mismatches, printing the first few.
@@ -1263,7 +1276,7 @@ test "MXFP4 GGUF block decode: matches reference" {
     const expected: []const f32 = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(expected_bytes)));
     try std.testing.expectEqual(n_elements, expected.len);
 
-    var pool: std.Thread.Pool = undefined;
+    var pool: thread_pool_mod.ThreadPool = undefined;
     try pool.init(.{ .allocator = allocator, .n_jobs = 1 });
     defer pool.deinit();
 

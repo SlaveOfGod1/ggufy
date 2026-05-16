@@ -6,9 +6,10 @@ pub const FileType = enum {
     safetensors,
     gguf,
 
-    pub fn detect_from_file(reader: *std.io.Reader, allocator: std.mem.Allocator) !FileType {
-        const file_header = try reader.readAlloc(allocator, 8);
-        defer allocator.free(file_header);
+    pub fn detect_from_file(reader: *std.Io.Reader, allocator: std.mem.Allocator) !FileType {
+        _ = allocator;
+        var file_header: [8]u8 = undefined;
+        reader.readSliceAll(&file_header) catch return error.UnknownFormat;
 
         // Check for GGUF magic "GGUF" followed by version (2 bytes) and tensor count
         if (std.mem.eql(u8, file_header[0..4], "GGUF")) {

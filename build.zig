@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         if (b.sysroot) |sysroot| {
             const fw_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
-            gui.addFrameworkPath(.{ .cwd_relative = fw_path });
+            gui.root_module.addFrameworkPath(.{ .cwd_relative = fw_path });
         }
     }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const st = @import("Safetensor.zig");
 const DataTransform = @import("DataTransform.zig");
+const thread_pool_mod = @import("ThreadPool.zig");
 
 pub const ComfyQuantScheme = enum { nvfp4, float8_e4m3fn, mxfp4, mxfp8_e4m3fn, unknown };
 
@@ -81,21 +82,20 @@ pub fn groupClusters(
     defer name_map.deinit();
     for (source.tensors.items, 0..) |t, i| try name_map.put(t.name, i);
 
-    var fp4_list: std.ArrayList(Fp4Cluster) = .{};
-    var float8_list: std.ArrayList(Float8Cluster) = .{};
-    var mxfp4_list: std.ArrayList(Mxfp4Cluster) = .{};
-    var mxfp8_list: std.ArrayList(Mxfp8Cluster) = .{};
+    var fp4_list: std.ArrayList(Fp4Cluster) = .empty;
+    var float8_list: std.ArrayList(Float8Cluster) = .empty;
+    var mxfp4_list: std.ArrayList(Mxfp4Cluster) = .empty;
+    var mxfp8_list: std.ArrayList(Mxfp8Cluster) = .empty;
 
     const comfy_suffix = ".comfy_quant";
-    var read_buf: [256]u8 = undefined;
 
     for (source.tensors.items) |t| {
         if (!std.mem.endsWith(u8, t.name, comfy_suffix)) continue;
 
-        var reader = try source.getReaderForTensor(t.name, &read_buf);
-        try reader.seekTo(t.offset + source.current_data_begin);
-        const data = try (&reader.interface).readAlloc(allocator, t.size);
+        const tensor_file = try source.openFileForTensor(t.name);
+        const data = try allocator.alloc(u8, t.size);
         defer allocator.free(data);
+        _ = try tensor_file.readPositionalAll(source.io, data, t.offset + source.current_data_begin);
 
         const scheme = parseComfyQuantScheme(data);
         const base_name = t.name[0 .. t.name.len - comfy_suffix.len];
@@ -298,22 +298,19 @@ pub fn dequantizeFp4Cluster(
 ) ![]f32 {
     if (cluster.cols % 64 != 0) return error.InvalidClusterShape;
 
-    var read_buf: [4096]u8 = undefined;
-
-    var w_reader = try source.getReaderForTensor(cluster.weight.name, &read_buf);
-    try w_reader.seekTo(cluster.weight.offset + source.current_data_begin);
-    const weight_bytes = try (&w_reader.interface).readAlloc(allocator, cluster.weight.size);
+    const w_file = try source.openFileForTensor(cluster.weight.name);
+    const weight_bytes = try allocator.alloc(u8, cluster.weight.size);
     defer allocator.free(weight_bytes);
+    _ = try w_file.readPositionalAll(source.io, weight_bytes, cluster.weight.offset + source.current_data_begin);
 
-    var ws_reader = try source.getReaderForTensor(cluster.weight_scale.name, &read_buf);
-    try ws_reader.seekTo(cluster.weight_scale.offset + source.current_data_begin);
-    const scale_bytes = try (&ws_reader.interface).readAlloc(allocator, cluster.weight_scale.size);
+    const ws_file = try source.openFileForTensor(cluster.weight_scale.name);
+    const scale_bytes = try allocator.alloc(u8, cluster.weight_scale.size);
     defer allocator.free(scale_bytes);
+    _ = try ws_file.readPositionalAll(source.io, scale_bytes, cluster.weight_scale.offset + source.current_data_begin);
 
-    var ws2_reader = try source.getReaderForTensor(cluster.weight_scale_2.name, &read_buf);
-    try ws2_reader.seekTo(cluster.weight_scale_2.offset + source.current_data_begin);
-    const gs_buf = try (&ws2_reader.interface).readAlloc(allocator, 4);
-    defer allocator.free(gs_buf);
+    const ws2_file = try source.openFileForTensor(cluster.weight_scale_2.name);
+    var gs_buf: [4]u8 = undefined;
+    _ = try ws2_file.readPositionalAll(source.io, &gs_buf, cluster.weight_scale_2.offset + source.current_data_begin);
     const global_scale: f32 = @bitCast(std.mem.readInt(u32, gs_buf[0..4], .little));
 
     return dequantizeFp4Raw(weight_bytes, scale_bytes, global_scale, cluster.rows, cluster.cols, allocator);
@@ -406,17 +403,15 @@ pub fn dequantizeFloat8Cluster(
     source: *st,
     allocator: std.mem.Allocator,
 ) ![]f32 {
-    var read_buf: [4096]u8 = undefined;
-
-    var w_reader = try source.getReaderForTensor(cluster.weight.name, &read_buf);
-    try w_reader.seekTo(cluster.weight.offset + source.current_data_begin);
-    const weight_bytes = try (&w_reader.interface).readAlloc(allocator, cluster.weight.size);
+    const w_file = try source.openFileForTensor(cluster.weight.name);
+    const weight_bytes = try allocator.alloc(u8, cluster.weight.size);
     defer allocator.free(weight_bytes);
+    _ = try w_file.readPositionalAll(source.io, weight_bytes, cluster.weight.offset + source.current_data_begin);
 
-    var ws_reader = try source.getReaderForTensor(cluster.weight_scale.name, &read_buf);
-    try ws_reader.seekTo(cluster.weight_scale.offset + source.current_data_begin);
-    const scale_buf = try (&ws_reader.interface).readAlloc(allocator, cluster.weight_scale.size);
+    const ws_file = try source.openFileForTensor(cluster.weight_scale.name);
+    const scale_buf = try allocator.alloc(u8, cluster.weight_scale.size);
     defer allocator.free(scale_buf);
+    _ = try ws_file.readPositionalAll(source.io, scale_buf, cluster.weight_scale.offset + source.current_data_begin);
     const scalar_scale: f32 = @bitCast(std.mem.readInt(u32, scale_buf[0..4], .little));
 
     const out = try allocator.alloc(f32, weight_bytes.len);
@@ -440,17 +435,15 @@ pub fn dequantizeMxfp4Cluster(
 ) ![]f32 {
     if (cluster.cols % 32 != 0) return error.InvalidClusterShape;
 
-    var read_buf: [4096]u8 = undefined;
-
-    var w_reader = try source.getReaderForTensor(cluster.weight.name, &read_buf);
-    try w_reader.seekTo(cluster.weight.offset + source.current_data_begin);
-    const weight_bytes = try (&w_reader.interface).readAlloc(allocator, cluster.weight.size);
+    const w_file = try source.openFileForTensor(cluster.weight.name);
+    const weight_bytes = try allocator.alloc(u8, cluster.weight.size);
     defer allocator.free(weight_bytes);
+    _ = try w_file.readPositionalAll(source.io, weight_bytes, cluster.weight.offset + source.current_data_begin);
 
-    var ws_reader = try source.getReaderForTensor(cluster.weight_scale.name, &read_buf);
-    try ws_reader.seekTo(cluster.weight_scale.offset + source.current_data_begin);
-    const scale_bytes = try (&ws_reader.interface).readAlloc(allocator, cluster.weight_scale.size);
+    const ws_file = try source.openFileForTensor(cluster.weight_scale.name);
+    const scale_bytes = try allocator.alloc(u8, cluster.weight_scale.size);
     defer allocator.free(scale_bytes);
+    _ = try ws_file.readPositionalAll(source.io, scale_bytes, cluster.weight_scale.offset + source.current_data_begin);
 
     const rows = cluster.rows;
     const cols = cluster.cols;
@@ -509,17 +502,15 @@ pub fn dequantizeMxfp8Cluster(
 ) ![]f32 {
     if (cluster.cols % 32 != 0) return error.InvalidClusterShape;
 
-    var read_buf: [4096]u8 = undefined;
-
-    var w_reader = try source.getReaderForTensor(cluster.weight.name, &read_buf);
-    try w_reader.seekTo(cluster.weight.offset + source.current_data_begin);
-    const weight_bytes = try (&w_reader.interface).readAlloc(allocator, cluster.weight.size);
+    const w_file = try source.openFileForTensor(cluster.weight.name);
+    const weight_bytes = try allocator.alloc(u8, cluster.weight.size);
     defer allocator.free(weight_bytes);
+    _ = try w_file.readPositionalAll(source.io, weight_bytes, cluster.weight.offset + source.current_data_begin);
 
-    var ws_reader = try source.getReaderForTensor(cluster.weight_scale.name, &read_buf);
-    try ws_reader.seekTo(cluster.weight_scale.offset + source.current_data_begin);
-    const scale_bytes = try (&ws_reader.interface).readAlloc(allocator, cluster.weight_scale.size);
+    const ws_file = try source.openFileForTensor(cluster.weight_scale.name);
+    const scale_bytes = try allocator.alloc(u8, cluster.weight_scale.size);
     defer allocator.free(scale_bytes);
+    _ = try ws_file.readPositionalAll(source.io, scale_bytes, cluster.weight_scale.offset + source.current_data_begin);
 
     return dequantizeMxfp8Raw(weight_bytes, scale_bytes, cluster.rows, cluster.cols, allocator);
 }
@@ -532,7 +523,7 @@ pub fn tryDequantCluster(
     source: *st,
     groups: *const GroupResult,
     allocator: std.mem.Allocator,
-    pool: *std.Thread.Pool,
+    pool: *thread_pool_mod.ThreadPool,
 ) !?[]f32 {
     _ = pool;
 
@@ -569,7 +560,7 @@ pub fn collapseModelTensors(
     if (groups.fp4_clusters.len == 0 and groups.float8_clusters.len == 0 and
         groups.mxfp4_clusters.len == 0 and groups.mxfp8_clusters.len == 0) return;
 
-    var new_tensors: std.ArrayList(types.Tensor) = .{};
+    var new_tensors: std.ArrayList(types.Tensor) = .empty;
 
     for (model_tensors.items) |t| {
         var handled = false;
@@ -580,7 +571,7 @@ pub fn collapseModelTensors(
                 new_t.dims = try arena_alloc.dupe(usize, &[_]usize{ cluster.rows, cluster.cols });
                 new_t.type = "BF16";
                 new_t.size = cluster.rows * cluster.cols * 2;
-                try new_tensors.append(arena_alloc, new_t);
+                try new_tensors.append(arena_alloc,new_t);
                 handled = true;
                 break;
             }
@@ -601,7 +592,7 @@ pub fn collapseModelTensors(
                     var n: usize = 1;
                     for (t.dims) |d| n *= d;
                     new_t.size = n * 2;
-                    try new_tensors.append(arena_alloc, new_t);
+                    try new_tensors.append(arena_alloc,new_t);
                     handled = true;
                     break;
                 }
@@ -621,7 +612,7 @@ pub fn collapseModelTensors(
                     new_t.dims = try arena_alloc.dupe(usize, &[_]usize{ cluster.rows, cluster.cols });
                     new_t.type = "BF16";
                     new_t.size = cluster.rows * cluster.cols * 2;
-                    try new_tensors.append(arena_alloc, new_t);
+                    try new_tensors.append(arena_alloc,new_t);
                     handled = true;
                     break;
                 }
@@ -642,7 +633,7 @@ pub fn collapseModelTensors(
                     var n: usize = 1;
                     for (t.dims) |d| n *= d;
                     new_t.size = n * 2;
-                    try new_tensors.append(arena_alloc, new_t);
+                    try new_tensors.append(arena_alloc,new_t);
                     handled = true;
                     break;
                 }
@@ -655,7 +646,7 @@ pub fn collapseModelTensors(
             }
         }
 
-        if (!handled) try new_tensors.append(arena_alloc, t);
+        if (!handled) try new_tensors.append(arena_alloc,t);
     }
 
     model_tensors.* = new_tensors;
@@ -669,15 +660,25 @@ const testing = std.testing;
 
 const fixture_dir = "src/test_fixtures";
 
+fn readFixtureFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
+    const io = std.testing.io;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const file_len = try file.length(io);
+    if (file_len > max_size) return error.FileTooLarge;
+    const buf = try allocator.alloc(u8, @intCast(file_len));
+    errdefer allocator.free(buf);
+    _ = try file.readPositionalAll(io, buf, 0);
+    return buf;
+}
+
 fn loadFixture(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
     var path_buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ fixture_dir, name });
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    return readFixtureFile(allocator, path, 64 * 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) return null;
         return err;
     };
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
 }
 
 test "parseComfyQuantScheme: identifies all known formats" {
