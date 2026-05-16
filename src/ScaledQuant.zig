@@ -394,6 +394,31 @@ pub fn dequantizeMxfp4Cluster(
     return out;
 }
 
+/// Core MXFP8 dequantization over raw byte slices. Caller owns the returned slice.
+/// weight_bytes: F8_E4M3 encoded values [rows × cols].
+/// scale_bytes: E8M0 values in linear row-major order, one per 32 elements.
+pub fn dequantizeMxfp8Raw(
+    weight_bytes: []const u8,
+    scale_bytes: []const u8,
+    rows: usize,
+    cols: usize,
+    allocator: std.mem.Allocator,
+) ![]f32 {
+    const out = try allocator.alloc(f32, rows * cols);
+    errdefer allocator.free(out);
+
+    const num_scale_cols = cols / 32;
+    for (weight_bytes, 0..) |byte, flat_idx| {
+        const row = flat_idx / cols;
+        const col = flat_idx % cols;
+        const scale_idx = row * num_scale_cols + col / 32;
+        const scale = DataTransform.Quantizer.e8m0_to_f32(scale_bytes[scale_idx]);
+        out[flat_idx] = DataTransform.Quantizer.lut_e4m3[byte] * scale;
+    }
+
+    return out;
+}
+
 /// Dequantize an MXFP8 E4M3 (OCP MX) cluster to F32.
 /// Scale layout is linear row-major; block size is 32.
 /// Caller owns the returned slice.
@@ -416,21 +441,7 @@ pub fn dequantizeMxfp8Cluster(
     const scale_bytes = try (&ws_reader.interface).readAlloc(allocator, cluster.weight_scale.size);
     defer allocator.free(scale_bytes);
 
-    const rows = cluster.rows;
-    const cols = cluster.cols;
-    const num_scale_cols = cols / 32;
-    const out = try allocator.alloc(f32, rows * cols);
-    errdefer allocator.free(out);
-
-    for (weight_bytes, 0..) |byte, flat_idx| {
-        const row = flat_idx / cols;
-        const col = flat_idx % cols;
-        const scale_idx = row * num_scale_cols + col / 32;
-        const scale = DataTransform.Quantizer.e8m0_to_f32(scale_bytes[scale_idx]);
-        out[flat_idx] = DataTransform.Quantizer.lut_e4m3[byte] * scale;
-    }
-
-    return out;
+    return dequantizeMxfp8Raw(weight_bytes, scale_bytes, cluster.rows, cluster.cols, allocator);
 }
 
 /// Check whether `dest_tensor` belongs to any cluster in `groups`.
@@ -695,6 +706,42 @@ test "MXFP8 cluster dequant: inline spot-check with E8M0 scale and F8 LUT" {
     // scale_byte=128 → 2.0; product = 2.0
     const scale = DataTransform.Quantizer.e8m0_to_f32(128);
     try testing.expectApproxEqAbs(@as(f32, 2.0), f8_val * scale, 1e-6);
+}
+
+test "MXFP8 dequant: fixture from real ComfyUI model (128×128 slice)" {
+    // Validates dequantizeMxfp8Raw against data extracted from
+    // etCenterV1_v10MXFP8.safetensors by gen_mxfp8_fixtures.py.
+    // Linear row-major scale layout, block size 32, no cuBLAS tiling.
+    const allocator = std.testing.allocator;
+
+    const weight_bytes = (try loadFixture(allocator, "mxfp8_weight.u8")) orelse return error.SkipZigTest;
+    defer allocator.free(weight_bytes);
+    const scale_bytes = (try loadFixture(allocator, "mxfp8_weight_scale.u8")) orelse return error.SkipZigTest;
+    defer allocator.free(scale_bytes);
+    const expected_bytes = (try loadFixture(allocator, "mxfp8_expected.f32")) orelse return error.SkipZigTest;
+    defer allocator.free(expected_bytes);
+
+    const rows: usize = 128;
+    const cols: usize = 128;
+    try testing.expectEqual(rows * cols, weight_bytes.len);
+    try testing.expectEqual(rows * (cols / 32), scale_bytes.len);
+
+    const expected: []const f32 = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(expected_bytes)));
+    try testing.expectEqual(rows * cols, expected.len);
+
+    const got = try dequantizeMxfp8Raw(weight_bytes, scale_bytes, rows, cols, allocator);
+    defer allocator.free(got);
+
+    var mismatches: usize = 0;
+    for (got, expected, 0..) |g, e, i| {
+        if (@abs(g - e) > 1e-6) {
+            if (mismatches < 8) {
+                std.debug.print("  MXFP8[{}]: got={d:.8} expected={d:.8}\n", .{ i, g, e });
+            }
+            mismatches += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), mismatches);
 }
 
 test "NVFP4 dequant: fixture from real ComfyUI model (128×256 slice)" {
