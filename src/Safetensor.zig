@@ -382,7 +382,6 @@ pub const DType = enum {
     F8_E5M2,
     SCALED_F8_E4M3,
     F4_E2M1,
-    FP4,
     MXFP4,
     MXFP8_E4M3,
     NVFP4,
@@ -421,16 +420,16 @@ pub const DType = enum {
             .F64, .I64, .U64 => 8,
             .I8, .U8, .F8_E4M3, .F8_E5M2, .SCALED_F8_E4M3 => 1,
             .I16, .U16 => 2,
-            .F4_E2M1, .FP4, .MXFP4 => 1, // sub-byte: use calcSizeInBytes(n) for accurate byte counts
+            .F4_E2M1, .MXFP4 => 1, // sub-byte: use calcSizeInBytes(n) for accurate byte counts
             .MXFP8_E4M3 => 1,
             .NVFP4 => 1,
         };
     }
 
-    /// Returns byte size for n elements, correctly handling sub-byte types like F4_E2M1/FP4/MXFP4.
+    /// Returns byte size for n elements, correctly handling sub-byte types like F4_E2M1/MXFP4.
     pub fn calcSizeInBytes(self: DType, n: u64) u64 {
         return switch (self) {
-            .F4_E2M1, .FP4, .MXFP4, .NVFP4 => (n + 1) / 2,
+            .F4_E2M1, .MXFP4, .NVFP4 => (n + 1) / 2,
             .MXFP8_E4M3 => n,
             else => self.getSizeInBytes() * n,
         };
@@ -1321,7 +1320,7 @@ pub fn saveWithSTData(self: Safetensors, source: *Safetensors, threads: usize, c
 
                 // Quantize to NVFP4 cluster
                 const cluster = try ScaledQuant.quantizeToNvFp4Raw(
-                    f32_slice, n_rows, n_cols, self.allocator,
+                    f32_slice, n_rows, n_cols, self.allocator, &pool,
                 );
                 defer self.allocator.free(cluster.weight);
                 defer self.allocator.free(cluster.scale);

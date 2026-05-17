@@ -55,7 +55,7 @@ pub const Quantizer = struct {
                     return error.InputSizeMismatch;
                 try dequantizeSimple(input_bytes, output_f32, pool, .F8_E5M2);
             },
-            .F4_E2M1, .FP4, .MXFP4 => {
+            .F4_E2M1, .MXFP4 => {
                 if (input_bytes.len * 2 != output_f32.len)
                     return error.InputSizeMismatch;
                 dequantizeFP4(input_bytes, output_f32, pool);
@@ -113,7 +113,7 @@ pub const Quantizer = struct {
                     return error.OutputBufferSizeMismatch;
                 try convertTypeSimple(input_f32, output_bytes, pool, dst_type);
             },
-            .F4_E2M1, .FP4, .MXFP4 => {
+            .F4_E2M1, .MXFP4 => {
                 if (output_bytes.len * 2 != input_f32.len)
                     return error.OutputBufferSizeMismatch;
                 quantizeFP4(input_f32, output_bytes, pool);
