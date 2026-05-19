@@ -19,3 +19,4 @@ pub const ggml_fp16_to_fp32_row = c.ggml_fp16_to_fp32_row;
 pub const ggml_fp32_to_fp16_row = c.ggml_fp32_to_fp16_row;
 pub const ggml_bf16_to_fp32_row = c.ggml_bf16_to_fp32_row;
 pub const ggml_fp32_to_bf16_row = c.ggml_fp32_to_bf16_row;
+pub const ggml_get_type_traits   = c.ggml_get_type_traits;

@@ -116,6 +116,21 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench);
     b.step("bench", "Run F8 benchmarks").dependOn(&run_bench.step);
 
+    const bench_eff = b.addExecutable(.{
+        .name = "bench-efficiency",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_efficiency.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "ggml.h", .module = ggml_h_module },
+            },
+        }),
+    });
+    ggml.link(b, bench_eff, target, .ReleaseFast);
+    const run_bench_eff = b.addRunArtifact(bench_eff);
+    b.step("bench-efficiency", "Run quantization efficiency benchmarks").dependOn(&run_bench_eff.step);
+
     // --- Tests ---
 
     const test_step = b.step("test", "Run tests");

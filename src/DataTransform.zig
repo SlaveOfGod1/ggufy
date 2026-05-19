@@ -85,7 +85,19 @@ pub const Quantizer = struct {
                 if (f64_count != output_f32.len) return error.InputSizeMismatch;
                 try dequantizeSimple(input_bytes, output_f32, pool, .F64);
             },
-            else => return error.UnsupportedSourceType,
+            else => {
+                // Generic GGUF block-type dequantization via GGML type traits
+                if (src_type.formatType() != .gguf) return error.UnsupportedSourceType;
+                const gguf_type = gguf.GgmlType.fromString(@tagName(src_type)) catch
+                    return error.UnsupportedSourceType;
+                const expected_size: usize = @intCast(src_type.calcSizeInBytes(@intCast(output_f32.len)));
+                if (input_bytes.len != expected_size) return error.InputSizeMismatch;
+                const traits = ggml.ggml_get_type_traits(
+                    @as(ggml.enum_ggml_type, @intCast(@intFromEnum(gguf_type))),
+                );
+                const to_float_fn = traits.*.to_float orelse return error.UnsupportedSourceType;
+                to_float_fn(input_bytes.ptr, output_f32.ptr, @intCast(output_f32.len));
+            },
         }
     }
 
