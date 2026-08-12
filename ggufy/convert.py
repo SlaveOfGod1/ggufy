@@ -715,7 +715,8 @@ def write_gguf(f, prep: PreparedConversion, opts: "ConvertOptions"):
         build_gguf_metadata(out_gguf.metadata, f, prep.arch,
                             prep.template_metadata, prep.extra_metadata, opts)
         try:
-            out_gguf.save_with_st_data(f, threads=opts.threads, groups=prep.groups)
+            out_gguf.save_with_st_data(f, threads=opts.threads, groups=prep.groups,
+                                       callbacks=opts.callbacks)
         except RuntimeError:
             try:
                 os.remove(out_filename)
@@ -737,7 +738,8 @@ def write_safetensors(f, prep: PreparedConversion, opts: "ConvertOptions"):
         sr_seed = opts.stochastic_rounding if opts.stochastic_rounding is not None else tc.DEFAULT_STOCHASTIC_SEED
         try:
             out_st.save_with_st_data(f, threads=opts.threads, groups=prep.groups,
-                                     stochastic_rounding=sr_seed)
+                                     stochastic_rounding=sr_seed,
+                                     callbacks=opts.callbacks)
         except RuntimeError:
             try:
                 os.remove(out_filename)
