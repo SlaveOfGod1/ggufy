@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ggufy"
+version = "0.1.0"
+description = "A lightweight and efficient tool to convert tensor formats (SafeTensors <-> GGUF)."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["numpy>=1.21"]
+
+[project.scripts]
+ggufy = "ggufy.cli:main"
+ggufy-gui = "ggufy.gui:run_gui"
+
+[tool.setuptools]
+packages = ["ggufy"]
+
+[tool.setuptools.package-data]
+ggufy = ["sensitivities/*.json", "configs/*.json"]

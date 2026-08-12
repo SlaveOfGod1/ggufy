@@ -1,100 +1,121 @@
-# GGUFy (Python Rewrite)
+# GGUFy (Python)
 
-This project is a Python-based fork of the original [GGUFy](https://github.com/qskousen/ggufy) project by `qskousen`. 
+A lightweight, robust, pure-Python tool to convert model tensor formats
+(SafeTensors ↔ GGUF), designed for seamless use with
+[ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF).
 
-A lightweight, robust, and completely pure Python tool to convert model tensor formats (Safetensors to GGUF), specifically built and optimized for seamless use with [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF).
-
-**Note:** This is a Python rewrite of the original Zig `ggufy` project, re-engineered for cross-platform stability, native Python GUI (Tkinter), and maximum compatibility with ComfyUI without requiring C++ compilers, Zig, or heavy PyTorch libraries.
-
----
-
-## Comparison: Zig vs. Python GGUFy
-
-| Feature / Support | Original Zig `ggufy` | Python Rewrite `GGUFy` (This Fork) |
-| :--- | :--- | :--- |
-| **Language & Engine** | Zig (compiled native binary) + GGML C/C++ | Pure Python 3 & NumPy |
-| **Dependencies** | None (self-contained executable) | `numpy`, `gguf`, `safetensors` |
-| **Cross-Platform** | Native builds for Win/Mac/Linux | Runs anywhere Python 3 + pip is available |
-| **GUI Framework** | `dvui` (custom Zig GUI) | Native Tkinter (highly stable & standard) |
-| **Architectures** | SD1.5, SDXL, SD3, Flux, Lumina2, Aura, HiDream, Cosmos, LTXV, Hyvid, WAN, Qwen, ERNIE | Auto-detects **SD1.5**, **SDXL**, **SD3**, and **Flux** |
-| **Built-in Quantization** | Full GGML Native Quantization (`q4_k`, `q8_0`, etc.) | Seamless **`f32`**, **`f16`**, and **`bf16`** formats. *Quantization flags fallback gracefully to F16 to ensure out-of-the-box compatibility without compilation.* |
-| **Sensitivity-Aware Quant** | Enabled via importance matrices | Accepts parameters (gracefully skipped in pure Python) |
-| **Metadata Parsing** | Fast custom C/Zig binary parser | Pure Python zero-copy seek parser (extremely fast) |
-
----
+This is a faithful Python port of [ggufy](https://github.com/qskousen/ggufy)
+by `qskousen`, keeping the same CLI, commands, options and on-disk formats as
+the original Zig tool. The only runtime dependency is `numpy`.
 
 ## Features
 
-- **Pure Python & NumPy:** No heavy PyTorch installations, no Zig compilers, and no C++ `safetensors` binding crashes.
-- **Flawless ComfyUI Compatibility:** Automatically detects the underlying model architecture (`sd1`, `sdxl`, `sd3`, `flux`) dynamically from tensor structures and embeds the exact tags ComfyUI expects.
-- **Native BF16 Support:** Implements a direct, lightning-fast byte-mapping pipeline to read `bfloat16` data seamlessly into NumPy without PyTorch.
-- **Instant Metadata Loading:** Uses a custom JSON-header parser that reads structure data instantaneously without loading full model files into memory.
-- **Interactive Tkinter GUI:** Includes an intuitive, lightweight GUI to convert files, inspect headers, and browse tensor structure with zero terminal commands.
+- **Real GGML quantization**: `f32`, `bf16`, `f16`, `q8_0`, `q5_0`, `q5_1`,
+  `q4_0`, `q4_1`, `q6_k`, `q5_k`, `q4_k`, `q3_k`, `q2_k`, `mxfp4` — block
+  layouts match the ggml reference byte-for-byte.
+- **SafeTensors datatype conversion**: `F32`, `F16`, `BF16`, `F8_E4M3`,
+  `F8_E5M2`, `SCALED_F8_E4M3`, `MXFP8_E4M3`, `NVFP4`, `INT8`, `INT8_CONVROT`,
+  `INT4_CONVROT`, `INT4_CONVROT_SR`, `ASYM_W4A8_INT8`, `MXFP4` (ComfyUI
+  cluster formats).
+- **Sensitivity-aware quantization** for supported architectures (SD1.5,
+  SDXL), with built-in sensitivity data.
+- **Architecture detection**: flux, sd3, aura, hidream, anima, cosmos, ltx2/3,
+  ltxv, hyvid, wan, sdxl, sd1, lumina2, mage_flow, qwen, ernie, krea2.
+- **Shape fix** with `comfy.gguf.orig_shape` metadata for ComfyUI.
+- **Native BF16/FP8/FP4 reading** — pure Python + NumPy, no PyTorch needed.
+- **CLI + tkinter GUI**, mirroring the original app.
+- Sharded SafeTensors (`model.safetensors.index.json`) support.
 
-## Installation
+## Requirements
 
-GGUFy requires Python 3.
+- Python 3.8+
+- `numpy` (install into your venv manually if you prefer)
 
-Install the required lightweight dependencies:
 ```bash
-pip install numpy gguf safetensors
+python -m venv venv
+venv\Scripts\activate          # Windows
+pip install numpy
 ```
 
-*(Note: While GGUFy implements a pure python zero-copy binary parser, installing `safetensors` ensures absolute compatibility across all python runtimes).*
+## CLI usage
 
-## GUI Usage
-
-Run the Tkinter-based GUI using:
 ```bash
-python ggufy_gui.py
-```
-The GUI allows you to easily browse for `.safetensors` files, select your target output format and datatype (e.g. `f16`, `bf16`), inspect model structure via "View Tensor Tree", and run the conversion effortlessly with real-time log outputs and progress bar tracking.
+# Run from this directory
+python main.py convert model.safetensors -d q4_k
 
-## CLI Usage
-
-### Convert a Model
-The primary use case is converting models from `.safetensors` to `.gguf` format.
-```bash
-python ggufy.py convert model.safetensors -d f16
-```
-You can optionally specify an output directory (`-o`) and output filename (`-n`):
-```bash
-python ggufy.py convert model.safetensors -d bf16 -n custom_name -o ./models/unet/
+# Or install as a console script
+pip install .
+ggufy convert model.safetensors -d q4_k
 ```
 
-### Inspect a Model
-GGUFy provides several subcommands to inspect the contents of `.safetensors` files without loading the heavy model data into memory:
-
-**View File Header**
-Displays basic tensor counts and metadata existence.
 ```bash
-python ggufy.py header model.safetensors
+ggufy convert model.safetensors -d q4_k -n my-model-q4-k -o ./converted/
+ggufy convert sdxl.safetensors -d q4_k -a 25          # sensitivity, conservative
+ggufy convert sdxl.safetensors -d q4_k -x             # skip sensitivity
+ggufy template existing.gguf                          # export template.json
+ggufy convert model.safetensors -t template.json      # convert using template
+ggufy header model.safetensors
+ggufy tree model.safetensors
+ggufy metadata model.gguf
+ggufy names model.safetensors
+ggufy sensitivities model.safetensors
+ggufy version
 ```
 
-**View Tensor Tree**
-Displays a hierarchical tree of all the tensor shapes grouped by block structure. Very useful for model analysis!
-```bash
-python ggufy.py tree model.safetensors
-```
+### Options
 
-**View Metadata**
-Displays all raw file metadata key-value pairs stored in the model.
-```bash
-python ggufy.py metadata model.safetensors
-```
-
-### CLI Options Reference
 ```
 -h, --help              Display help and exit
--d, --datatype          Target quantization type (default: f16). Supported: f16, f32, bf16
--f, --filetype          Target file format (default: gguf)
--o, --output-dir        Output directory (default: same as source) 
--n, --output-name       Output filename without extension
--m, --model-only        Convert only the main model (Strip 'model.' prefixes). WARNING: Leave this disabled if converting for ComfyUI.
+-d, --datatype          Target quantization type (default: source datatype)
+-f, --filetype          Target file format (default: gguf) Options: gguf, safetensors
+-t, --template          Use a JSON template for conversion
+-o, --output-dir        Output directory (default: same as source)
+-n, --output-name       Output filename without extension (default: source name + datatype)
+-j, --threads           Number of threads for quantization (default: CPU core count)
+-a, --aggressiveness    Aggressiveness of sensitivity-aware quantization (default: 50)
+-x, --skip-sensitivity  Skip sensitivity-aware quantization
+-s, --sensitivities     Path to a sensitivities JSON file to use
+-q, --use-quant-types   Quantization families to use with sensitivity (e.g. "k", "0,k")
+-m, --model-only        When output is safetensors, convert only the main model
+-u, --allow-unknown-arch Allow converting files with unrecognized architectures
+-U, --allow-upscale     Allow converting from a lower-precision source to a higher-precision target
+-A, --arch              Set the architecture name written to GGUF metadata
+-R, --stochastic-rounding Seed for INT4_CONVROT_SR stochastic rounding
+-c, --calculate-size    Compute and print the exact final output size without writing
+-S, --shapes            With names: emit {"name":...,"shape":[...]} objects
 ```
 
-## Special Thanks & Related Projects
+## GUI
 
-- Original [GGUFy](https://github.com/qskousen/ggufy) project by `qskousen`.
-- [ComfyUI-GGUF by city96](https://github.com/city96/ComfyUI-GGUF) for serving as the fundamental ecosystem this rewrite targets.
-- [gguf library](https://github.com/ggerganov/llama.cpp/tree/master/gguf-py) for python GGUF writing compatibility.
+```bash
+python main.py gui
+# or after pip install: ggufy-gui
+```
+
+## Package layout
+
+```
+ggufy/
+  cli.py            Command-line interface
+  convert.py        Conversion pipeline (types, sensitivity, shape fix, writers)
+  data_transform.py FP8/FP4/BF16 conversions, Hadamard rotation, INT8/INT4/W4A8
+  ggml.py           GGML block layouts and reference quantize/dequantize
+  gguf.py           GGUF reader/writer
+  safetensor.py     SafeTensors reader/writer (single + sharded)
+  tensor_clusters.py ComfyUI cluster grouping, dequantization and writing
+  image_arch.py     Architecture detection
+  file_loader.py    Unified model loader
+  gui.py            tkinter GUI
+  types.py          Shared data types
+  sensitivities/    Built-in sensitivity data (sd1.5, sdxl, ...)
+  configs/          Base architecture configs (ltx2/3)
+```
+
+## Acknowledgements
+
+- [ggufy (Zig)](https://github.com/qskousen/ggufy) — the original tool this
+  port is based on.
+- [ggml](https://github.com/ggml-org/ggml) — quantization algorithms ported
+  from the reference implementation.
+- [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) — for documenting the
+  quantization and architecture detection formats.
