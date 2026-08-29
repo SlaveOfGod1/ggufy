@@ -10,8 +10,24 @@ This branch adds **Anima support** for the official
 
 ## Supported architectures
 
-Flux, SD3, AuraFlow, HiDream, LTX Video, SDXL, Lumina2, Qwen, Krea2,
-Cosmos, and **Anima** (Cosmos-Predict2 + T5 `llm_adapter`).
+| Architecture | Model family | Notes |
+|---|---|---|
+| **flux** | FLUX.1, Black Forest Labs | Schnell, Dev, Pro |
+| **sd3** | Stable Diffusion 3 | Multi-rectified flow |
+| **aura** | AuraFlow | Visual flow |
+| **hidream** | HiDream | Text-to-image |
+| **ltxv** | LTX-Video | Video generation |
+| **hyvid** | Hybrid Video | Video diffusion |
+| **wan** | Wan | Video generation |
+| **sdxl** | Stable Diffusion XL | SDXL, SDXL Turbo, Pony, Illustrious, NovaeAnime etc. |
+| **sd1** | Stable Diffusion 1.5 | SD1.5, RealisticVision, CyberRealistic etc. |
+| **lumina2** | Lumina Image 2.0 | Gemma2-based |
+| **mage_flow** | MAGE | Flow-based |
+| **qwen** | Qwen | Multimodal |
+| **ernie** | ERNIE | Baidu |
+| **krea2** | Krea 2 | Visual flow |
+| **cosmos** | NVIDIA Cosmos-Predict2 | MiniTrainDIT backbone |
+| **anima** | circlestone-labs/Anima | Cosmos-Predict2 + T5 `llm_adapter` (text adapter kept high-precision) |
 
 ## Features
 

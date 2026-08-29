@@ -1,18 +1,15 @@
 """Model architecture detection.
 
-Port of src/ImageArch.zig: detection key sets, high-precision key patterns,
-ignored keys, shape rules and upcast lists. Detection runs over the tensor
-list (stripping prefixes).
-
-This fork is dedicated to the official Anima model
-(https://huggingface.co/circlestone-labs/Anima): a 2B text-to-image
-diffusion model built on NVIDIA Cosmos-Predict2 with a bolted-on T5 text
-adapter (`llm_adapter`). Only the `anima` architecture is registered in
-ARCH_LIST, so any other model is reported as an unknown architecture.
+Port of src/ImageArch.zig: a list of known image-diffusion architectures with
+detection key sets, high-precision key patterns, ignored keys, shape rules and
+upcast lists. Detection runs over the tensor list (stripping prefixes), and
+architectures that share a tensor-name set (Mage-Flow vs Qwen-Image) are
+disambiguated by shape rules.
 """
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional
 
 
@@ -133,32 +130,42 @@ def has_banned_keys_in_tensors(arch: Arch, tensors) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Architecture definition (from src/ImageArch.zig)
+# Architecture definitions (from src/ImageArch.zig)
 # ---------------------------------------------------------------------------
 
-# Anima is Cosmos-Predict2 (MiniTrainDIT) with an extra bolted-on T5 text
-# adapter (`llm_adapter`). It shares Cosmos's entire backbone, so its detect
-# keys are Cosmos's two plus the llm_adapter discriminator. This mirrors
-# ComfyUI's own model_detection.py, which starts at "cosmos_predict2" and
-# reclassifies to "anima" iff `llm_adapter.blocks.0.cross_attn.q_proj.weight`
-# is present. "anima" is a valid `general.architecture` value for the
-# ComfyUI-GGUF loader (it's in PIG_ARCH_LIST), so we can name it distinctly.
-#
-# The ENTIRE `llm_adapter` is kept high-precision (not just its embedding),
-# matching the reference converter silveroxides/convert_to_quant (its
-# ANIMA_LAYER_KEYNAMES lists "llm_adapter" as highprec). Two reasons:
-#   1. ComfyUI: the adapter's `embed.weight` is an nn.Embedding table that
-#      can't be block/int-quantized (also caught generically by
-#      is_embedding_weight() in convert.py).
-#   2. Forge Neo: its loader's `process_anima` MOVES the whole llm_adapter out
-#      of the transformer and into the *text-encoder* component. If any adapter
-#      tensor is quantized, the text encoder loads via its MixedPrecision path
-#      and scaled_dot_product_attention throws on mismatched dtypes. Keeping
-#      the adapter fully bf16 avoids the quantized path entirely.
-#
-# High-precision set also includes the first block, block 1's adaln modulation,
-# the final layer, and the timestep/patch embedders -- the small,
-# sensitivity-critical layers that the reference tool keeps in full precision.
+_FLUX = Arch(
+    name="flux", shape_fix=True,
+    keys_detect=[["transformer_blocks.0.attn.norm_added_k.weight"],
+                 ["double_blocks.0.img_attn.proj.weight"]],
+    keys_banned=["transformer_blocks.0.attn.norm_added_k.weight"],
+    upcast_from_bf16=[".norm.query_norm.scale", ".norm.key_norm.scale",
+                      ".norm.query_norm.weight", ".norm.key_norm.weight"],
+    keys_nvfp4_passthrough=["img_in.weight", "txt_in.weight",
+                            "vector_in.in_layer.weight"],
+)
+
+_SD3 = Arch(
+    name="sd3",
+    keys_detect=[["transformer_blocks.0.attn.add_q_proj.weight"],
+                 ["joint_blocks.0.x_block.attn.qkv.weight"]],
+    keys_banned=["transformer_blocks.0.attn.add_q_proj.weight"],
+    keys_nvfp4_passthrough=["y_embedder.mlp.0.weight", "context_embedder.weight"],
+)
+
+_AURA = Arch(
+    name="aura",
+    keys_detect=[["double_layers.3.modX.1.weight"],
+                 ["joint_transformer_blocks.3.ff_context.out_projection.weight"]],
+    keys_banned=["joint_transformer_blocks.3.ff_context.out_projection.weight"],
+)
+
+_HIDREAM = Arch(
+    name="hidream",
+    keys_detect=[["caption_projection.0.linear.weight",
+                  "double_stream_blocks.0.block.ff_i.shared_experts.w3.weight"]],
+    keys_hiprec=[".ff_i.gate.weight", "img_emb.emb_pos"],
+)
+
 _ANIMA = Arch(
     name="anima",
     keys_detect=[["blocks.0.mlp.layer1.weight",
@@ -170,12 +177,134 @@ _ANIMA = Arch(
     keys_ignore=["_extra_state", "accum_"],
 )
 
-# Anima-only fork: the official model is the only registered architecture.
-# Other image-diffusion architectures are intentionally not listed, so
-# detection/conversion targets the official Anima checkpoint exclusively.
-# (The generic conversion machinery still works; unknown models simply require
-# --allow-unknown-arch like any unrecognized file.)
-ARCH_LIST = [_ANIMA]
+_COSMOS = Arch(
+    name="cosmos",
+    keys_detect=[["blocks.0.mlp.layer1.weight",
+                  "blocks.0.adaln_modulation_cross_attn.1.weight"]],
+    keys_hiprec=["pos_embedder"],
+    keys_ignore=["_extra_state", "accum_"],
+)
+
+_HYVID = Arch(
+    name="hyvid",
+    keys_detect=[["double_blocks.0.img_attn_proj.weight",
+                  "txt_in.individual_token_refiner.blocks.1.self_attn_qkv.weight"]],
+)
+
+_WAN = Arch(
+    name="wan",
+    keys_detect=[["blocks.0.self_attn.norm_q.weight", "text_embedding.2.weight",
+                  "head.modulation"]],
+    keys_hiprec=[".modulation"],
+)
+
+_LTXV = Arch(
+    name="ltxv",
+    keys_detect=[["adaln_single.emb.timestep_embedder.linear_2.weight",
+                  "transformer_blocks.27.scale_shift_table",
+                  "caption_projection.linear_2.weight"]],
+    keys_hiprec=["scale_shift_table"],
+)
+
+with open(os.path.join(os.path.dirname(__file__), "configs", "ltx23_base_config.json"),
+          "r", encoding="utf-8") as _f:
+    _LTX23_BASE = _f.read()
+
+_LTX2 = Arch(
+    name="ltxv",
+    base_config_json=_LTX23_BASE,
+    keys_detect=[["adaln_single.emb.timestep_embedder.linear_2.weight",
+                  "transformer_blocks.47.scale_shift_table",
+                  "patchify_proj.weight"]],
+    keys_hiprec=["scale_shift_table", "_norm.weight", ".bias", "adaln_single",
+                 "patchify_proj.weight", "proj_out.weight", "learnable_registers"],
+)
+
+with open(os.path.join(os.path.dirname(__file__), "sensitivities", "sdxl.json"),
+          "r", encoding="utf-8") as _f:
+    _SDXL_SENS = _f.read()
+
+_SDXL = Arch(
+    name="sdxl", shape_fix=True,
+    keys_detect=[["down_blocks.0.downsamplers.0.conv.weight", "add_embedding.linear_1.weight"],
+                 ["input_blocks.3.0.op.weight", "input_blocks.6.0.op.weight",
+                  "output_blocks.2.2.conv.weight", "output_blocks.5.2.conv.weight"],
+                 ["label_emb.0.0.weight"]],
+    sensitivities=_SDXL_SENS,
+    keys_nvfp4_passthrough=["label_emb.0.0.weight"],
+)
+
+with open(os.path.join(os.path.dirname(__file__), "sensitivities", "sd1.5.json"),
+          "r", encoding="utf-8") as _f:
+    _SD1_SENS = _f.read()
+
+_SD1 = Arch(
+    name="sd1", shape_fix=True,
+    keys_detect=[["down_blocks.0.downsamplers.0.conv.weight"],
+                 ["input_blocks.3.0.op.weight", "input_blocks.6.0.op.weight",
+                  "input_blocks.9.0.op.weight", "output_blocks.2.1.conv.weight",
+                  "output_blocks.5.2.conv.weight", "output_blocks.8.2.conv.weight"]],
+    sensitivities=_SD1_SENS,
+    keys_nvfp4_passthrough=["label_emb.0.0.weight"],
+)
+
+_LUMINA2 = Arch(
+    name="lumina2",
+    keys_detect=[["cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight"]],
+    shape_fix=True,
+    keys_ignore=["norm_final.weight"],
+    threshold=8192,
+    upcast_from_bf16=["cap_pad_token", "x_pad_token"],
+    keys_nvfp4_passthrough=["cap_embedder.1.weight"],
+)
+
+_QWEN = Arch(
+    name="qwen",
+    keys_detect=[["time_text_embed.timestep_embedder.linear_2.weight",
+                  "transformer_blocks.0.attn.norm_added_q.weight",
+                  "transformer_blocks.0.img_mlp.net.0.proj.weight"]],
+    shape_fix=True,
+    upcast_from_bf16=["txt_norm.weight", ".norm_k.weight", ".norm_q.weight",
+                      ".norm_added_k.weight", ".norm_added_q.weight"],
+    keys_nvfp4_passthrough=["img_in.weight"],
+)
+
+_MAGEFLOW = Arch(
+    name="mage_flow",
+    keys_detect=[["time_text_embed.timestep_embedder.linear_2.weight",
+                  "transformer_blocks.0.attn.norm_added_q.weight",
+                  "transformer_blocks.0.img_mlp.net.0.proj.weight",
+                  "txt_norm.weight", "proj_out.weight"]],
+    shape_detect=[ShapeRule("txt_norm.weight", 0, 2560),
+                  ShapeRule("proj_out.weight", 0, 128)],
+    shape_fix=True,
+    keys_hiprec=["txt_norm.weight", "img_in.", "txt_in.", "proj_out.",
+                 "norm_out.linear", "time_text_embed"],
+    upcast_from_bf16=["txt_norm.weight", ".norm_k.weight", ".norm_q.weight",
+                      ".norm_added_k.weight", ".norm_added_q.weight"],
+)
+
+_ERNIE = Arch(
+    name="ernie",
+    keys_detect=[["adaLN_modulation.1.weight", "x_embedder.proj.weight",
+                  "text_proj.weight", "layers.0.mlp.linear_fc2.weight"]],
+    shape_fix=True,
+    upcast_from_bf16=[".adaLN_sa_ln.weight", ".adaLN_mlp_ln.weight"],
+)
+
+_KREA2 = Arch(
+    name="krea2",
+    keys_detect=[["blocks.0.attn.qknorm.qnorm.scale", "txtfusion.projector.weight"]],
+    shape_fix=True,
+    keys_hiprec=["txtfusion", "tmlp", "tproj", "first.", "last.", ".projector"],
+    upcast_from_bf16=[".qknorm.qnorm.scale", ".qknorm.knorm.scale",
+                      ".prenorm.scale", ".postnorm.scale"],
+    keys_nvfp4_passthrough=["first.weight"],
+)
+
+ARCH_LIST = [_FLUX, _SD3, _AURA, _HIDREAM, _ANIMA, _COSMOS, _LTX2, _LTXV,
+             _HYVID, _WAN, _SDXL, _SD1, _LUMINA2, _MAGEFLOW, _QWEN, _ERNIE,
+             _KREA2]
 
 GENERIC_ARCH = Arch(name="unknown", keys_detect=[])
 
