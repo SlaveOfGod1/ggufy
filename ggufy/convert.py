@@ -645,6 +645,13 @@ def stamp_converter_provenance(metadata: Dict[str, Any]):
 def build_gguf_metadata(metadata: Dict[str, Any], f, arch, template_metadata,
                         extra_metadata, opts: "ConvertOptions"):
     arch_name = opts.arch_override if opts.arch_override else arch.name
+    # Compat: vanilla ComfyUI-GGUF's loader.py IMG_ARCH_LIST doesn't include
+    # "anima" yet, so it rejects general.architecture="anima" with
+    # "Unexpected architecture type". Map to "cosmos" (Anima's base, whitelisted)
+    # unless user explicitly overrides via -A/Arch override. If you update
+    # ComfyUI-GGUF to include "anima", pass -A anima to keep the distinct arch.
+    if arch_name == "anima" and opts.arch_override is None:
+        arch_name = "cosmos"
     metadata["general.architecture"] = arch_name
     metadata["general.quantization_version"] = 2
     metadata["general.file_type"] = gguf_file_type(opts.datatype)
