@@ -71,22 +71,6 @@ There are three main ways to convert:
 - using the `template` command to generate a JSON template for a model and using it with `convert`,
 - using the `convert` command with a sensitivity file to perform sensitivity-aware quantization.
 
-### Converting Anima
-
-Anima is detected automatically from its tensor keys (`blocks.0.mlp.layer1.weight`,
-`blocks.0.adaln_modulation_cross_attn.1.weight`, and the discriminator
-`llm_adapter.blocks.0.cross_attn.q_proj.weight`). The entire `llm_adapter`
-(embedding + cross/self-attention blocks) is kept high-precision, since its
-`embed.weight` is an `nn.Embedding` that cannot be block-quantized.
-
-```bash
-# Convert Anima to GGUF
-python main.py convert anima-base-v1.0.safetensors -d q4_k
-
-# With a specific output name and directory
-python main.py convert anima-base-v1.0.safetensors -d q8_0 -n anima-base-q8_0 -o ./converted/
-```
-
 ### CLI
 
 For the full command reference — all commands and options, quantization levels, sensitivity-aware quantization, inspecting model files, and complete examples — see **[docs/CLI.md](docs/CLI.md)**.
