@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ggufy"
 version = "0.1.0"
-description = "A lightweight and efficient tool to convert tensor formats (SafeTensors <-> GGUF)."
+description = "Anima-only fork of ggufy: a lightweight tool to convert the official Anima model (circlestone-labs/Anima) between SafeTensors and GGUF quantizations."
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = ["numpy>=1.21"]

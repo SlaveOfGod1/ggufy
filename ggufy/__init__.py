@@ -1,10 +1,8 @@
-"""ggufy - a lightweight and efficient tool to convert tensor formats.
+"""ggufy (Anima edition) - a lightweight and efficient tool to convert the
+official Anima model (circlestone-labs/Anima) between SafeTensors and GGUF.
 
-Python port of the Zig ggufy tool: converts safetensors to various GGUF
-quantizations and supports safetensors datatype conversions (F32, BF16, F16,
-F8 E4M3/E5M2, Scaled F8 E4M3, MXFP8 E4M3, NVFP4, INT8, INT8 CONVROT,
-INT4 CONVROT, INT4 CONVROT SR), with sensitivity-aware quantization for
-supported architectures.
+Python port of the Zig ggufy tool, specialized for Anima in this fork: see
+`ggufy/image_arch.py` and `README.md` for the Anima-only scope and rationale.
 """
 
 __version__ = "0.1.0"
