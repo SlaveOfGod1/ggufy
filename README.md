@@ -1,52 +1,43 @@
-# GGUFy (Python)
+# ggufy
+A lightweight and efficient tool to convert tensor formats.
 
-A lightweight, robust, pure-Python tool to convert model tensor formats
-(SafeTensors ↔ GGUF), designed for seamless use with
-[ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF).
+ggufy:
+- is a pure-Python port (Python 3 + NumPy) of the original [ggufy](https://github.com/qskousen/ggufy), which works on linux, windows, and macos
+- comes in CLI and GUI flavors
+- supports converting from safetensors to various gguf quantizations
+- supports converting safetensors datatypes (F32, BF16, F16, F8 E4M3/E5M2, Scaled F8 E4M3, MXFP8 E4M3, NVFP4, INT8, INT8 CONVROT, INT4 CONVROT, INT4 CONVROT SR, ASYM_W4A8_INT8, MXFP4)
+- supports converting with "[quantization sensitivity](docs/CLI.md#sensitivity-aware-quantization)" files (some architectures built-in)
+- currently targets image and video diffusion models (SD1.5, SDXL, Anima, etc.)
 
-This is a faithful Python port of [ggufy](https://github.com/qskousen/ggufy)
-by `qskousen`, keeping the same CLI, commands, options and on-disk formats as
-the original Zig tool. The only runtime dependency is `numpy`.
+This fork adds support for the official [Anima](https://huggingface.co/circlestone-labs/Anima) model (a 2B text-to-image model built on NVIDIA Cosmos-Predict2 with a bolted-on T5 text adapter).
 
-## Features
+### Supported architectures
 
-- **Real GGML quantization**: `f32`, `bf16`, `f16`, `q8_0`, `q5_0`, `q5_1`,
-  `q4_0`, `q4_1`, `q6_k`, `q5_k`, `q4_k`, `q3_k`, `q2_k`, `mxfp4` — block
-  layouts match the ggml reference byte-for-byte.
-- **SafeTensors datatype conversion**: `F32`, `F16`, `BF16`, `F8_E4M3`,
-  `F8_E5M2`, `SCALED_F8_E4M3`, `MXFP8_E4M3`, `NVFP4`, `INT8`, `INT8_CONVROT`,
-  `INT4_CONVROT`, `INT4_CONVROT_SR`, `ASYM_W4A8_INT8`, `MXFP4` (ComfyUI
-  cluster formats).
-- **Sensitivity-aware quantization** for supported architectures (SD1.5,
-  SDXL), with built-in sensitivity data.
-- **Architecture detection**: flux, sd3, aura, hidream, **anima**, cosmos, ltx2/3,
-  ltxv, hyvid, wan, sdxl, sd1, lumina2, mage_flow, qwen, ernie, krea2.
-- **Shape fix** with `comfy.gguf.orig_shape` metadata for ComfyUI.
-- **Native BF16/FP8/FP4 reading** — pure Python + NumPy, no PyTorch needed.
-- **CLI + tkinter GUI**, mirroring the original app.
-- Sharded SafeTensors (`model.safetensors.index.json`) support.
+This table lists the architectures that ggufy can convert, and whether they have sensitivity data available.
 
-## Anima support
+| Architecture       | Supported | Sensitivity Data |
+|--------------------|-----------|------------------|
+| SD1.5              | ✅         | ✅                |
+| SDXL               | ✅         | ✅                |
+| Flux               | ✅         | ❌                |
+| Lumina2 (ZiT, ZiB) | ✅         | ❌                |
+| Aura               | ✅         | ❌                |
+| HiDream            | ✅         | ❌                |
+| Cosmos             | ✅         | ❌                |
+| Anima              | ✅         | ❌                |
+| LTXV               | ✅         | ❌                |
+| LTX2               | ✅         | ❌                |
+| Hyvid              | ✅         | ❌                |
+| WAN                | ✅         | ❌                |
+| SD3                | ✅         | ❌                |
+| Qwen               | ✅         | ❌                |
+| ERNIE              | ✅         | ❌                |
+| Krea2              | ✅         | ❌                |
+| Mage-Flow          | ✅         | ❌                |
 
-This repo also includes support for the official
-[circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) model
-(a 2B text-to-image model built on NVIDIA
-[Cosmos-Predict2-2B-Text2Image](https://huggingface.co/nvidia/Cosmos-Predict2-2B-Text2Image)
-with a bolted-on T5 text adapter, `llm_adapter`).
+## Installation
 
-- Detected via `blocks.0.mlp.layer1.weight`, `blocks.0.adaln_modulation_cross_attn.1.weight`,
-  and the discriminator `llm_adapter.blocks.0.cross_attn.q_proj.weight`
-  (mirrors ComfyUI's `model_detection.py` reclassification of `cosmos_predict2`).
-- The entire `llm_adapter` is kept high-precision (its `embed.weight` is an
-  `nn.Embedding` that can't be block-quantized), matching the reference
-  converter [silveroxides/convert_to_quant](https://github.com/silveroxides/convert_to_quant).
-- Maps to `general.architecture = "cosmos"` for ComfyUI-GGUF compatibility
-  (override with `-A anima` if needed).
-
-## Requirements
-
-- Python 3.8+
-- `numpy` (install into your venv manually if you prefer)
+This is a Python port, so the only requirement is Python 3.8+ and `numpy`.
 
 ```bash
 python -m venv venv
@@ -54,16 +45,51 @@ venv\Scripts\activate          # Windows
 pip install numpy
 ```
 
-## CLI usage
+Run directly from the repo:
 
 ```bash
-# Run from this directory
-python main.py convert model.safetensors -d q4_k
+python main.py --help
+```
 
-# Or install as a console script
+Or install as a console script:
+
+```bash
 pip install .
+ggufy --help
+```
+
+## Usage
+
+The primary use case for ggufy is converting models from safetensors to gguf format:
+
+```bash
 ggufy convert model.safetensors -d q4_k
 ```
+
+There are three main ways to convert:
+- using the `convert` command by itself,
+- using the `template` command to generate a JSON template for a model and using it with `convert`,
+- using the `convert` command with a sensitivity file to perform sensitivity-aware quantization.
+
+### Converting Anima
+
+Anima is detected automatically from its tensor keys (`blocks.0.mlp.layer1.weight`,
+`blocks.0.adaln_modulation_cross_attn.1.weight`, and the discriminator
+`llm_adapter.blocks.0.cross_attn.q_proj.weight`). The entire `llm_adapter`
+(embedding + cross/self-attention blocks) is kept high-precision, since its
+`embed.weight` is an `nn.Embedding` that cannot be block-quantized.
+
+```bash
+# Convert Anima to GGUF
+python main.py convert anima-base-v1.0.safetensors -d q4_k
+
+# With a specific output name and directory
+python main.py convert anima-base-v1.0.safetensors -d q8_0 -n anima-base-q8_0 -o ./converted/
+```
+
+### CLI
+
+For the full command reference — all commands and options, quantization levels, sensitivity-aware quantization, inspecting model files, and complete examples — see **[docs/CLI.md](docs/CLI.md)**.
 
 ```bash
 ggufy convert model.safetensors -d q4_k -n my-model-q4-k -o ./converted/
@@ -109,30 +135,11 @@ python main.py gui
 # or after pip install: ggufy-gui
 ```
 
-## Package layout
-
-```
-ggufy/
-  cli.py            Command-line interface
-  convert.py        Conversion pipeline (types, sensitivity, shape fix, writers)
-  data_transform.py FP8/FP4/BF16 conversions, Hadamard rotation, INT8/INT4/W4A8
-  ggml.py           GGML block layouts and reference quantize/dequantize
-  gguf.py           GGUF reader/writer
-  safetensor.py     SafeTensors reader/writer (single + sharded)
-  tensor_clusters.py ComfyUI cluster grouping, dequantization and writing
-  image_arch.py     Architecture detection
-  file_loader.py    Unified model loader
-  gui.py            tkinter GUI
-  types.py          Shared data types
-  sensitivities/    Built-in sensitivity data (sd1.5, sdxl, ...)
-  configs/          Base architecture configs (ltx2/3)
-```
+A tkinter GUI (no extra dependencies) mirroring the original app.
 
 ## Acknowledgements
 
-- [ggufy (Zig)](https://github.com/qskousen/ggufy) — the original tool this
-  port is based on.
-- [ggml](https://github.com/ggml-org/ggml) — quantization algorithms ported
-  from the reference implementation.
-- [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) — for documenting the
-  quantization and architecture detection formats.
+- [ggufy (Zig)](https://github.com/qskousen/ggufy) — the original tool this port is based on
+- [ggml](https://github.com/ggml-org/ggml) — quantization algorithms ported from the reference implementation
+- [ComfyUI-GGUF by city96](https://github.com/city96/ComfyUI-GGUF) — for helping me to understand a lot about how the quantization works, as well as architecture detection
+- [silveroxides/convert_to_quant](https://github.com/silveroxides/convert_to_quant) — reference for Anima quantization rules
